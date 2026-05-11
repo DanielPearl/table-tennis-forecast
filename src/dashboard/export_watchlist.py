@@ -71,42 +71,63 @@ def build_watchlist_records(live_records: list[dict[str, Any]] | None = None
 
     for raw in live_records:
         rec = standardize(raw)
-
-        pre = safe_predict(
-            rec["player_a"], rec["player_b"],
-            level=raw.get("level", "ST"),
-            round_=raw.get("round", "R32"),
-            best_of=int(raw.get("best_of") or 7),
-            rank_a=raw.get("rank_a"), rank_b=raw.get("rank_b"),
-            hand_a=raw.get("hand_a", "R"), hand_b=raw.get("hand_b", "R"),
-        )
-        pre_prob_a = pre["prob_a"]
-
-        adj = live_adjust(
-            pre_prob_a, rec,
-            player_a_comeback_rate=float(comeback_rates.get(rec["player_a"], 0.0)),
-            player_b_comeback_rate=float(comeback_rates.get(rec["player_b"], 0.0)),
-        )
-        live_prob_a = adj.live_prob_a
-
+        market_type = raw.get("_market_type") or "match"
         market_prob_a = rec.get("market_prob_a")
+
+        if market_type == "tournament":
+            # Tournament-winner contracts (multi-side futures) don't fit
+            # the head-to-head model. Surface the row with the market
+            # price + no model opinion — edge is 0 by construction, so
+            # the signal layer naturally emits WATCH and the BUY gate
+            # never fires. The user still sees every Kalshi table-tennis
+            # market in the watchlist.
+            pre_prob_a = market_prob_a if market_prob_a is not None else 0.5
+            live_prob_a = pre_prob_a
+            edge_a = 0.0 if market_prob_a is not None else None
+            edge_b = 0.0 if market_prob_a is not None else None
+            ev_a = 0.0 if market_prob_a is not None else None
+            ev_b = 0.0 if market_prob_a is not None else None
+            from types import SimpleNamespace
+            adj = SimpleNamespace(
+                volatility_score=0.05, injury_news_flag=False,
+                market_overreaction=False, rules_fired=[],
+            )
+            sig = SimpleNamespace(
+                label="WATCH",
+                reason="tournament-winner market — informational only",
+                confidence_score=0.5,
+            )
+        else:
+            pre = safe_predict(
+                rec["player_a"], rec["player_b"],
+                level=raw.get("level", "ST"),
+                round_=raw.get("round", "R32"),
+                best_of=int(raw.get("best_of") or 7),
+                rank_a=raw.get("rank_a"), rank_b=raw.get("rank_b"),
+                hand_a=raw.get("hand_a", "R"), hand_b=raw.get("hand_b", "R"),
+            )
+            pre_prob_a = pre["prob_a"]
+            adj = live_adjust(
+                pre_prob_a, rec,
+                player_a_comeback_rate=float(comeback_rates.get(rec["player_a"], 0.0)),
+                player_b_comeback_rate=float(comeback_rates.get(rec["player_b"], 0.0)),
+            )
+            live_prob_a = adj.live_prob_a
+            edge_a = (live_prob_a - market_prob_a) if market_prob_a is not None else None
+            edge_b = -edge_a if edge_a is not None else None
+            ev_a = (ev_calc(live_prob_a, market_prob_a, slip).ev_per_contract
+                     if market_prob_a is not None else None)
+            ev_b = (ev_calc(1 - live_prob_a, 1 - market_prob_a, slip).ev_per_contract
+                     if market_prob_a is not None else None)
+            sig = label_match(
+                live_prob_a, market_prob_a,
+                volatility=adj.volatility_score,
+                injury_flag=adj.injury_news_flag,
+                market_overreaction=adj.market_overreaction,
+                rules_fired=adj.rules_fired,
+            )
+
         market_prob_b = (1.0 - market_prob_a) if market_prob_a is not None else None
-
-        edge_a = (live_prob_a - market_prob_a) if market_prob_a is not None else None
-        edge_b = -edge_a if edge_a is not None else None
-
-        ev_a = (ev_calc(live_prob_a, market_prob_a, slip).ev_per_contract
-                 if market_prob_a is not None else None)
-        ev_b = (ev_calc(1 - live_prob_a, 1 - market_prob_a, slip).ev_per_contract
-                 if market_prob_a is not None else None)
-
-        sig = label_match(
-            live_prob_a, market_prob_a,
-            volatility=adj.volatility_score,
-            injury_flag=adj.injury_news_flag,
-            market_overreaction=adj.market_overreaction,
-            rules_fired=adj.rules_fired,
-        )
 
         row = {
             "match_id": rec["match_id"] or f"{rec['player_a']}-{rec['player_b']}",

@@ -212,10 +212,46 @@ def fetch_table_tennis_markets(
     return out
 
 
+_TOURNAMENT_TITLE_RE = re.compile(
+    r"^Will (?P<player>.+?) win the (?P<tourney>.+?)\??\s*$",
+    re.IGNORECASE,
+)
+
+
+def _parse_tournament_title(title: str) -> dict[str, str]:
+    """Parse a tournament-winner title like 'Will Ma Long win the 2026 ITTF
+    World Championships?'. Used for >2-side events where each market is
+    a separate player-as-YES contract for the tournament outcome."""
+    if not title:
+        return {}
+    m = _TOURNAMENT_TITLE_RE.match(title.strip())
+    if not m:
+        return {}
+    return {
+        "player": m.group("player").strip(),
+        "tournament": m.group("tourney").strip(),
+    }
+
+
 def collapse_to_matches(markets: list[dict],
                          prev_markets_by_ticker: dict[str, dict] | None = None
                          ) -> list[dict]:
-    """Group two-sided markets into one record per event_ticker."""
+    """Group Kalshi markets into watchlist records.
+
+    Two shapes are handled:
+
+      * **Head-to-head match events** (2 markets per event_ticker, one
+        YES per player) — collapsed into a single match record where
+        player_a is the alphabetically-first ticker's player and
+        player_b is the other side.
+
+      * **Tournament-winner events** (3+ markets per event_ticker, one
+        YES per contender) — emitted as ONE ROW PER PLAYER, with
+        player_b set to "Field". These don't fit the head-to-head
+        model, so the exporter marks them ``_market_type=tournament``
+        and skips edge-based signals; they're surfaced for visibility
+        only.
+    """
     by_event: dict[str, list[dict]] = {}
     for m in markets:
         ev = m.get("event_ticker") or ""
@@ -228,6 +264,59 @@ def collapse_to_matches(markets: list[dict],
         if len(sides) < 1:
             continue
         sides.sort(key=lambda x: x.get("ticker") or "")
+
+        # Tournament-winner shape — one row per side.
+        if len(sides) >= 3:
+            for m in sides:
+                t = _parse_tournament_title(m.get("title", ""))
+                player = t.get("player") or (m.get("ticker") or "").split("-")[-1]
+                tournament_name = t.get("tournament") or _tournament_from_rules(
+                    m.get("rules_primary") or "")
+                mkt = _yes_price_dollars(m)
+                prev = (prev_markets_by_ticker or {}).get(m.get("ticker") or "")
+                prev_mkt = _yes_price_dollars(prev) if prev else None
+                status_closed = (m.get("status") or "").lower() in (
+                    "closed", "settled", "finalized"
+                )
+                out.append({
+                    "match_id": m.get("ticker"),  # unique per player
+                    "ticker_a": m.get("ticker"),
+                    "ticker_b": None,
+                    "tournament": tournament_name,
+                    "surface": "Indoor",
+                    "level": "GS",  # tournament markets are big events
+                    "round": "F",
+                    "best_of": 7,
+                    "player_a": player,
+                    "player_b": "Field",
+                    "_market_type": "tournament",
+                    "set_score_a": 0, "set_score_b": 0,
+                    "current_game_score_a": 0, "current_game_score_b": 0,
+                    "point_streak_a": 0, "point_streak_b": 0,
+                    "is_deuce": False, "is_game_point_a": False,
+                    "is_game_point_b": False, "is_set_point_a": False,
+                    "is_set_point_b": False, "is_match_point_a": False,
+                    "is_match_point_b": False, "is_closing_game": False,
+                    "medical_timeout": False,
+                    "injury_news_flag": False,
+                    "retirement_risk_flag": False,
+                    "market_prob_a": mkt,
+                    "market_prob_a_prev": prev_mkt,
+                    "completed": status_closed,
+                    "winner_side": None,
+                    "expected_expiration_time": m.get("expected_expiration_time"),
+                    "rules_primary": m.get("rules_primary") or "",
+                    "yes_ask_cents_a": _ask_cents(m, "yes"),
+                    "yes_ask_cents_b": None,
+                    "volume_a": _volume(m),
+                    "open_interest_a": _open_interest(m),
+                    "spread_cents": _spread_cents(m),
+                    "title_a": m.get("title"),
+                    "title_b": None,
+                })
+            continue
+
+        # Head-to-head match shape — 2 markets, one row.
         a_market = sides[0]
         b_market = sides[1] if len(sides) >= 2 else None
         a_title = _parse_title(a_market.get("title", ""))
