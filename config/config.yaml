@@ -164,13 +164,17 @@ dashboard:
   refresh_seconds: 60
   title: "Table Tennis Forecast"
 
-# Kalshi series tickers to poll. Table tennis on Kalshi is published
-# under a small number of series; the live monitor iterates each and
-# collapses two-sided markets into match-level records. Add tickers
-# here as Kalshi launches new ones — the rest of the code is series-
-# agnostic.
+# Kalshi series tickers to poll. Each is a match-level series — the
+# live monitor pulls open markets in each, collapses the two-sided
+# event into one record per match.
+#
+# Discovered via the /series endpoint with the Table Tennis tag. The
+# tournament-winner series (KXITTFMEN / KXITTFWOMEN, without the
+# -MATCH suffix) are deliberately NOT included — those settle on the
+# whole tournament outcome, not individual matches.
 kalshi:
   series:
-    - KXTABLETENNIS
-    - KXWTTSGLES
-    - KXATTABLE
+    - KXTABLETENNIS       # generic Table Tennis Match
+    - KXITTFMENMATCH      # ITTF Men's match-level
+    - KXITTFWOMENMATCH    # ITTF Women's match-level
+    - KXTTELITEGAME       # TT Elite Series match-level
