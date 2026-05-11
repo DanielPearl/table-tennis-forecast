@@ -22,6 +22,7 @@ from ..data.fetch_live_scores import load_live_state
 from ..features.build_live_features import standardize
 from ..models.live_adjustment_model import adjust as live_adjust
 from ..models.predict import safe_predict
+from ..trading.buy_gate import evaluate as evaluate_buy
 from ..trading.ev import ev as ev_calc
 from ..trading.signals import label_match
 from ..utils.config import load_config, resolve_path
@@ -107,7 +108,7 @@ def build_watchlist_records(live_records: list[dict[str, Any]] | None = None
             rules_fired=adj.rules_fired,
         )
 
-        out.append({
+        row = {
             "match_id": rec["match_id"] or f"{rec['player_a']}-{rec['player_b']}",
             "tournament": rec["tournament"],
             "surface": rec["surface"],
@@ -141,7 +142,17 @@ def build_watchlist_records(live_records: list[dict[str, Any]] | None = None
             "title_b": raw.get("title_b"),
             "title": (raw.get("title_a") if (edge_a or 0) >= 0
                        else raw.get("title_b")),
-        })
+        }
+        decision = evaluate_buy(row, cfg.get("trading") or {})
+        row["buy_eligible"] = bool(decision.eligible)
+        row["buy_score"] = round(float(decision.score), 6)
+        row["buy_side"] = decision.side
+        row["buy_side_edge"] = round(float(decision.side_edge), 4)
+        row["buy_side_ev"] = (round(float(decision.side_ev), 4)
+                                if decision.side_ev is not None else None)
+        row["buy_gates"] = decision.gates
+        row["buy_blockers"] = decision.blockers
+        out.append(row)
 
     return out
 
