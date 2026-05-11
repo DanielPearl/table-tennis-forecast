@@ -67,37 +67,77 @@ def _parse_title(title: str) -> dict[str, str]:
     }
 
 
-def _yes_price_dollars(market: dict) -> float | None:
-    ya = market.get("yes_ask")
-    if ya is not None:
-        try:
-            return max(0.01, min(0.99, float(ya) / 100.0))
-        except (TypeError, ValueError):
-            pass
-    na = market.get("no_ask")
-    if na is not None:
-        try:
-            return max(0.01, min(0.99, 1.0 - float(na) / 100.0))
-        except (TypeError, ValueError):
-            pass
-    yb = market.get("yes_bid")
-    if yb is not None:
-        try:
-            return max(0.01, min(0.99, float(yb) / 100.0))
-        except (TypeError, ValueError):
-            pass
+def _to_float(v):
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _market_price_prob(market: dict, side: str) -> float | None:
+    """Side ask price as an implied probability. Tries Kalshi's new
+    ``*_ask_dollars`` field first (0.60 → 60%), then the legacy cents
+    field, so the same code works across both API generations."""
+    if side == "yes":
+        ya = (_to_float(market.get("yes_ask_dollars"))
+               or (_to_float(market.get("yes_ask")) or 0.0) / 100.0)
+        if ya:
+            return max(0.01, min(0.99, ya))
+    else:
+        na = (_to_float(market.get("no_ask_dollars"))
+               or (_to_float(market.get("no_ask")) or 0.0) / 100.0)
+        if na:
+            return max(0.01, min(0.99, na))
     return None
 
 
+def _yes_price_dollars(market: dict) -> float | None:
+    p = _market_price_prob(market, "yes")
+    if p is not None:
+        return p
+    no_p = _market_price_prob(market, "no")
+    if no_p is not None:
+        return max(0.01, min(0.99, 1.0 - no_p))
+    yb = (_to_float(market.get("yes_bid_dollars"))
+           or (_to_float(market.get("yes_bid")) or 0.0) / 100.0)
+    if yb:
+        return max(0.01, min(0.99, yb))
+    return None
+
+
+def _ask_cents(market: dict, side: str) -> int | None:
+    if side == "yes":
+        d = _to_float(market.get("yes_ask_dollars"))
+        if d is not None:
+            return int(round(d * 100))
+        c = _to_float(market.get("yes_ask"))
+        return int(c) if c is not None else None
+    d = _to_float(market.get("no_ask_dollars"))
+    if d is not None:
+        return int(round(d * 100))
+    c = _to_float(market.get("no_ask"))
+    return int(c) if c is not None else None
+
+
 def _spread_cents(market: dict) -> float | None:
-    ya = market.get("yes_ask")
-    yb = market.get("yes_bid")
-    if ya is None or yb is None:
-        return None
-    try:
+    ya_d = _to_float(market.get("yes_ask_dollars"))
+    yb_d = _to_float(market.get("yes_bid_dollars"))
+    if ya_d is not None and yb_d is not None:
+        return (ya_d - yb_d) * 100.0
+    ya = _to_float(market.get("yes_ask"))
+    yb = _to_float(market.get("yes_bid"))
+    if ya is not None and yb is not None:
         return float(ya) - float(yb)
-    except (TypeError, ValueError):
-        return None
+    return None
+
+
+def _volume(market: dict) -> float | None:
+    return _to_float(market.get("volume_fp")) or _to_float(market.get("volume"))
+
+
+def _open_interest(market: dict) -> float | None:
+    return (_to_float(market.get("open_interest_fp"))
+            or _to_float(market.get("open_interest")))
 
 
 def _tournament_from_rules(rules: str) -> str:
@@ -214,15 +254,12 @@ def collapse_to_matches(markets: list[dict],
         )
         winner_side = None
         if is_closed and b_market is not None:
-            ya = a_market.get("yes_ask") or 0
-            yb = b_market.get("yes_ask") or 0
-            try:
-                if int(ya) >= 99:
-                    winner_side = "PLAYER_A"
-                elif int(yb) >= 99:
-                    winner_side = "PLAYER_B"
-            except (TypeError, ValueError):
-                pass
+            ya = _ask_cents(a_market, "yes") or 0
+            yb = _ask_cents(b_market, "yes") or 0
+            if ya >= 99:
+                winner_side = "PLAYER_A"
+            elif yb >= 99:
+                winner_side = "PLAYER_B"
 
         out.append({
             "match_id": event_ticker,
@@ -252,10 +289,10 @@ def collapse_to_matches(markets: list[dict],
             "winner_side": winner_side,
             "expected_expiration_time": a_market.get("expected_expiration_time"),
             "rules_primary": rules,
-            "yes_ask_cents_a": a_market.get("yes_ask"),
-            "yes_ask_cents_b": (b_market.get("yes_ask") if b_market else None),
-            "volume_a": a_market.get("volume"),
-            "open_interest_a": a_market.get("open_interest"),
+            "yes_ask_cents_a": _ask_cents(a_market, "yes"),
+            "yes_ask_cents_b": (_ask_cents(b_market, "yes") if b_market else None),
+            "volume_a": _volume(a_market),
+            "open_interest_a": _open_interest(a_market),
             "spread_cents": _spread_cents(a_market),
             "title_a": a_market.get("title"),
             "title_b": (b_market.get("title") if b_market else None),
