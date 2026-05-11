@@ -144,6 +144,12 @@ trading:
   # Volatility cap — match-point / deuce can push past this; we wait
   # for the rally to settle before firing.
   max_tradable_volatility: 0.55
+  # Liquidity / spread validations. The simulator's BUY gate requires
+  # the book to clear both before opening a paper position. Tighter than
+  # tennis because table-tennis books are typically thinner — we want to
+  # fire only when there's enough depth to actually fill.
+  min_open_interest: 75
+  max_spread_cents: 6
   bet_size: 1.0
 
 # ---------------------------------------------------------------------

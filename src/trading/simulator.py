@@ -20,6 +20,7 @@ from typing import Any
 
 from ..utils.config import load_config, resolve_path
 from ..utils.logging_setup import setup_logging
+from .ev import ev as ev_calc
 
 log = setup_logging("trading.simulator")
 
@@ -217,10 +218,25 @@ def tick(watchlist_rows: list[dict[str, Any]],
         if market_a is None or live_a is None:
             continue
         side, mkt_for_side, model_for_side = _pick_side(float(live_a), float(market_a))
-        if not (float(t["min_market_prob"]) <= mkt_for_side <= float(t["max_market_prob"])):
-            continue
+        # ── BUY gate: edge + EV + validations all must pass ──────────────
         if abs(model_for_side - mkt_for_side) < float(t["small_edge_min"]):
             continue
+        ev_obj = ev_calc(model_for_side, mkt_for_side, slippage)
+        if ev_obj.ev_per_contract < float(t.get("min_ev", 0.0)):
+            continue
+        if not (float(t["min_market_prob"]) <= mkt_for_side <= float(t["max_market_prob"])):
+            continue
+        min_oi = float(t.get("min_open_interest", 0))
+        if min_oi > 0:
+            oi = r.get("open_interest")
+            if oi is None or float(oi) < min_oi:
+                continue
+        max_spread = t.get("max_spread_cents")
+        if max_spread is not None:
+            spread = r.get("spread_cents")
+            if spread is not None and float(spread) > float(max_spread):
+                continue
+        # ── all gates passed — open the position ─────────────────────────
         side_player = r["player_a"] if side == "PLAYER_A" else r["player_b"]
         position_id = f"{match_id}-{side}-{int(datetime.now(timezone.utc).timestamp())}"
         title = (r.get("title_a") if side == "PLAYER_A"
