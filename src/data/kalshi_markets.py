@@ -1,0 +1,273 @@
+"""Real Kalshi table-tennis market fetcher.
+
+Mirrors the tennis sibling: iterates each configured series via the
+kalshi_sdk, collapses two-sided markets into one record per match,
+and writes the canonical live-state file the watchlist exporter
+reads.
+
+Title parsing
+  Kalshi table-tennis titles vary by series but generally read
+  "Will {Player Name} win the {LastA} vs {LastB}: {Round} match?"
+  — same pattern as tennis. We use a flexible regex and fall back to
+  picking the player from the ``yes_sub_title`` field when present.
+
+Pricing
+  ``yes_ask`` → implied probability (cents → dollars). Two-sided NO
+  fallback when only one side is quoted, identical to tennis.
+"""
+from __future__ import annotations
+
+import os
+import re
+import time
+from typing import Iterable
+
+from ..utils.config import load_config, resolve_path
+from ..utils.logging_setup import setup_logging
+
+log = setup_logging("data.kalshi_markets")
+
+
+_TITLE_RE = re.compile(
+    r"^Will (?P<player>.+?) win the (?P<lastA>[^\s]+) vs (?P<lastB>[^\s]+):"
+    r"\s*(?P<round>[^?]+) match\?\s*$"
+)
+
+
+def _client():
+    try:
+        from kalshi_sdk import KalshiClient
+    except ImportError as exc:
+        raise RuntimeError(
+            "kalshi_sdk not installed in this venv — pip install -e the "
+            "shared sdk under /root/kalshi_sdk (or set up the editable "
+            "dep in your local checkout)"
+        ) from exc
+    api_key = os.environ.get("KALSHI_API_KEY_ID", "").strip()
+    pkey = os.environ.get("KALSHI_PRIVATE_KEY_PATH", "").strip()
+    if not api_key or not pkey:
+        raise RuntimeError(
+            "KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PATH must be set "
+            "in the env (see the bot's systemd EnvironmentFile)"
+        )
+    return KalshiClient(api_key_id=api_key, private_key_path=pkey)
+
+
+def _parse_title(title: str) -> dict[str, str]:
+    if not title:
+        return {}
+    m = _TITLE_RE.match(title.strip())
+    if not m:
+        return {}
+    return {
+        "player": m.group("player").strip(),
+        "round": m.group("round").strip(),
+        "lastA": m.group("lastA").strip(),
+        "lastB": m.group("lastB").strip(),
+    }
+
+
+def _yes_price_dollars(market: dict) -> float | None:
+    ya = market.get("yes_ask")
+    if ya is not None:
+        try:
+            return max(0.01, min(0.99, float(ya) / 100.0))
+        except (TypeError, ValueError):
+            pass
+    na = market.get("no_ask")
+    if na is not None:
+        try:
+            return max(0.01, min(0.99, 1.0 - float(na) / 100.0))
+        except (TypeError, ValueError):
+            pass
+    yb = market.get("yes_bid")
+    if yb is not None:
+        try:
+            return max(0.01, min(0.99, float(yb) / 100.0))
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _spread_cents(market: dict) -> float | None:
+    ya = market.get("yes_ask")
+    yb = market.get("yes_bid")
+    if ya is None or yb is None:
+        return None
+    try:
+        return float(ya) - float(yb)
+    except (TypeError, ValueError):
+        return None
+
+
+def _tournament_from_rules(rules: str) -> str:
+    if not rules:
+        return "WTT"
+    m = re.search(
+        r"\d{4}\s+([A-Z][A-Za-z .'-]+?"
+        r"(?:Open|Cup|Championships|Smash|Star Contender|Contender|"
+        r"Champions|Finals|Olympic|World))",
+        rules,
+    )
+    if m:
+        return m.group(1).strip()
+    return "WTT"
+
+
+def _round_to_code(round_str: str) -> str:
+    if not round_str:
+        return "R32"
+    s = round_str.lower()
+    if "round of 128" in s: return "R128"
+    if "round of 64" in s: return "R64"
+    if "round of 32" in s: return "R32"
+    if "round of 16" in s: return "R16"
+    if "quarter" in s: return "QF"
+    if "semi" in s: return "SF"
+    if "final" in s: return "F"
+    if "group" in s: return "GRP"
+    return "R32"
+
+
+def _best_of_from_rules(rules: str) -> int:
+    """Kalshi table-tennis rules sometimes name the match format.
+    Default to best-of-7 (WTT senior tour standard); world-tour group
+    stages occasionally use bo5."""
+    if not rules:
+        return 7
+    s = rules.lower()
+    if "best of 5" in s or "best-of-5" in s:
+        return 5
+    if "best of 7" in s or "best-of-7" in s:
+        return 7
+    if "best of 3" in s:
+        return 3
+    return 7
+
+
+def fetch_table_tennis_markets(
+    series: Iterable[str] | None = None,
+    inter_series_pause_s: float = 1.0,
+) -> list[dict]:
+    """Pull every active Kalshi table-tennis market.
+
+    Series come from ``config.kalshi.series`` by default. We iterate
+    each in turn with a short pause to stay clear of the rate limit;
+    any series that 404s or rate-limits is logged and skipped.
+    """
+    if series is None:
+        cfg = load_config()
+        series = list(cfg.get("kalshi", {}).get("series") or [])
+    c = _client()
+    out: list[dict] = []
+    for s in series:
+        try:
+            for m in c.iter_open_markets(series_ticker=s):
+                out.append(m)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("fetch %s failed: %s", s, exc)
+        time.sleep(inter_series_pause_s)
+    log.info("fetched %d table-tennis markets across %d series",
+             len(out), len(list(series)))
+    return out
+
+
+def collapse_to_matches(markets: list[dict],
+                         prev_markets_by_ticker: dict[str, dict] | None = None
+                         ) -> list[dict]:
+    """Group two-sided markets into one record per event_ticker."""
+    by_event: dict[str, list[dict]] = {}
+    for m in markets:
+        ev = m.get("event_ticker") or ""
+        if not ev:
+            continue
+        by_event.setdefault(ev, []).append(m)
+
+    out: list[dict] = []
+    for event_ticker, sides in by_event.items():
+        if len(sides) < 1:
+            continue
+        sides.sort(key=lambda x: x.get("ticker") or "")
+        a_market = sides[0]
+        b_market = sides[1] if len(sides) >= 2 else None
+        a_title = _parse_title(a_market.get("title", ""))
+        b_title = (_parse_title(b_market.get("title", ""))
+                    if b_market else {})
+        player_a = (a_title.get("player")
+                     or (a_market.get("ticker") or "").split("-")[-1])
+        player_b = b_title.get("player") or ""
+        if not player_b and b_market is None:
+            lastA, lastB = a_title.get("lastA", ""), a_title.get("lastB", "")
+            player_b = (lastB if a_title.get("player", "").endswith(lastA)
+                         else lastA)
+        rules = a_market.get("rules_primary") or ""
+        tournament = _tournament_from_rules(rules)
+        best_of = _best_of_from_rules(rules)
+        round_str = a_title.get("round") or "R32"
+        round_code = _round_to_code(round_str)
+
+        market_yes_a = _yes_price_dollars(a_market)
+        prev = (prev_markets_by_ticker or {}).get(a_market.get("ticker") or "")
+        market_yes_a_prev = (_yes_price_dollars(prev) if prev else None)
+        is_closed = (a_market.get("status") or "").lower() in (
+            "closed", "settled", "finalized"
+        )
+        winner_side = None
+        if is_closed and b_market is not None:
+            ya = a_market.get("yes_ask") or 0
+            yb = b_market.get("yes_ask") or 0
+            try:
+                if int(ya) >= 99:
+                    winner_side = "PLAYER_A"
+                elif int(yb) >= 99:
+                    winner_side = "PLAYER_B"
+            except (TypeError, ValueError):
+                pass
+
+        out.append({
+            "match_id": event_ticker,
+            "ticker_a": a_market.get("ticker"),
+            "ticker_b": (b_market.get("ticker") if b_market else None),
+            "tournament": tournament,
+            "surface": "Indoor",
+            "level": "ST",  # default to Star Contender; refined later
+            "round": round_code,
+            "best_of": best_of,
+            "player_a": player_a,
+            "player_b": player_b,
+            "set_score_a": 0, "set_score_b": 0,
+            "current_game_score_a": 0, "current_game_score_b": 0,
+            "point_streak_a": 0, "point_streak_b": 0,
+            "is_deuce": False,
+            "is_game_point_a": False, "is_game_point_b": False,
+            "is_set_point_a": False, "is_set_point_b": False,
+            "is_match_point_a": False, "is_match_point_b": False,
+            "is_closing_game": False,
+            "medical_timeout": False,
+            "injury_news_flag": False,
+            "retirement_risk_flag": False,
+            "market_prob_a": market_yes_a,
+            "market_prob_a_prev": market_yes_a_prev,
+            "completed": is_closed,
+            "winner_side": winner_side,
+            "expected_expiration_time": a_market.get("expected_expiration_time"),
+            "rules_primary": rules,
+            "yes_ask_cents_a": a_market.get("yes_ask"),
+            "yes_ask_cents_b": (b_market.get("yes_ask") if b_market else None),
+            "volume_a": a_market.get("volume"),
+            "open_interest_a": a_market.get("open_interest"),
+            "spread_cents": _spread_cents(a_market),
+            "title_a": a_market.get("title"),
+            "title_b": (b_market.get("title") if b_market else None),
+        })
+    return out
+
+
+def write_live_state(records: list[dict]) -> str:
+    import json
+    cfg = load_config()
+    fp = resolve_path(cfg["paths"]["raw_dir"]) / "live_state.json"
+    fp.parent.mkdir(parents=True, exist_ok=True)
+    with open(fp, "w", encoding="utf-8") as f:
+        json.dump(records, f, indent=2, default=str)
+    return str(fp)

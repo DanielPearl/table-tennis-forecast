@@ -1,0 +1,170 @@
+# Table Tennis Forecast — config.
+#
+# The pre-match model gives the baseline probability before the match
+# starts. The live model adjusts during the match using in-match state
+# and market movement, then flags spots where the market appears to
+# overreact. Live perceived value is the headline output: live model
+# probability vs current market implied probability.
+#
+# Edit values here, not the code.
+
+paths:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  outputs_dir: data/outputs
+  artifacts_dir: data/processed/artifacts
+  seed_matches_csv: data/raw/seed_matches.csv
+  watchlist_csv: data/outputs/watchlist.csv
+  watchlist_json: data/outputs/watchlist.json
+  backtest_csv: data/outputs/backtest_results.csv
+
+# ---------------------------------------------------------------------
+# Data sources. Table tennis has no Sackmann-equivalent free historical
+# feed, so we ship a synthetic seed CSV bundled with the repo and allow
+# extensible hooks for live ITTF / WTT data pulls. The seed is realistic
+# enough to bootstrap the Elo state + train the ensemble; once real
+# tournament data is plumbed in, the trainer prefers it automatically.
+# ---------------------------------------------------------------------
+data:
+  use_seed_if_no_external: true
+  # External puller hook — left blank for MVP; populated when an
+  # ITTF / WTT licensed feed is plumbed in. The repo never requires it.
+  external_csv_url: ""
+  history_start_year: 2020
+  history_end_year: 2026
+
+# ---------------------------------------------------------------------
+# Elo configuration. Table tennis Elo converges quickly because top
+# players play 60-120 official matches a year. We use a moderately
+# high K with a steep decay; once a player has 50+ matches the K floors
+# at 16 to stabilize ratings while still letting fresh juniors move.
+# ---------------------------------------------------------------------
+elo:
+  default_rating: 1500.0
+  k_base: 40.0
+  k_floor: 16.0
+  k_decay_matches: 50
+  # Best-of-7 matches carry more signal per result than best-of-5, so
+  # they get a small K bump — converges the rating toward truth faster
+  # without spiking volatility on shorter ties.
+  bo7_k_multiplier: 1.10
+  # Style-matchup Elo: a separate per-(player, opponent_handedness) Elo
+  # captures the well-documented left-hand-vs-right-hand asymmetry in
+  # table tennis without polluting the overall rating.
+  style_k_multiplier: 1.0
+  style_blend: 0.25
+
+model:
+  # Held-out evaluation window. 12 months keeps the test set on the
+  # current player pool and the current ball / rule generation.
+  test_window_months: 12
+  random_state: 42
+  # Broad initial feature panel. The trainer prunes anything whose
+  # walk-forward permutation importance is consistently negative or
+  # statistically indistinguishable from noise (see
+  # ``src/models/train_prematch_model.py::_prune_noisy_features``).
+  feature_panel: broad
+  ensemble:
+    use_xgboost_if_available: true
+    n_estimators: 500
+    learning_rate: 0.04
+    max_depth: 4
+  # Permutation-importance pruning. After the broad-panel fit, drop any
+  # feature whose mean importance is below ``prune_floor`` AND whose
+  # variance band crosses zero. Re-fit on the pruned panel and persist
+  # whichever model has the better held-out log-loss.
+  prune_floor: 0.0015
+  prune_min_features: 6
+
+# ---------------------------------------------------------------------
+# Live-adjustment rules. Phase-1 is transparent: every nudge is
+# auditable and the dashboard surfaces them as a "reason" string.
+# Nudges below shift the baseline probability by at most ~12pp under
+# realistic in-match scenarios.
+#
+# Table-tennis-specific signals included:
+#   * deuce_pressure_bump      — deuce + game-point swings volatility
+#   * comeback_pressure_bump   — trailing player has historical comeback
+#   * closing_game_volatility  — last game of the match
+#   * match_point_volatility   — match point hanging on this exchange
+#   * server_advantage_factor  — service rotation in table tennis swings
+#                                point-win % more than in other sports
+# ---------------------------------------------------------------------
+live_rules:
+  # Per-game completed in the match: shift toward the in-match leader.
+  # Capped so even a 4-0 in best-of-7 doesn't move the prob more than
+  # max_in_match_shift.
+  per_game_weight: 0.020
+  max_in_match_shift: 0.14
+  # Point-streak signal. A run of 4+ consecutive points within a game
+  # shifts perceived momentum even when the game score hasn't flipped.
+  point_streak_threshold: 4
+  point_streak_weight: 0.015
+  point_streak_max_shift: 0.05
+  # Deuce / game-point / match-point — each pushes volatility because
+  # the outcome is hanging on a single exchange.
+  deuce_volatility_bump: 0.12
+  game_point_volatility_bump: 0.10
+  set_point_volatility_bump: 0.15
+  match_point_volatility_bump: 0.22
+  # "Closing" volatility — the final game of a best-of-N has thicker
+  # outcome tails and the live trader should size accordingly.
+  closing_game_volatility_bump: 0.08
+  # Comeback tendencies. We attach per-player historical comeback rates
+  # (from after-losing-game-1, from 2-0 down in bo7, etc.); when a
+  # player with a high comeback rate is trailing, we blunt the negative
+  # nudge by ``comeback_dampener``.
+  comeback_dampener: 0.30
+  # Server-advantage factor. Table-tennis serve advantage is real but
+  # smaller than in volleyball/tennis — typically +3-5pp on point win
+  # rate. We use this when the dashboard wants per-point-level live
+  # probability estimates (e.g. "12-12 deuce, A to serve").
+  server_advantage_pp: 0.04
+  # Market overreaction band. The market moved a lot but the live
+  # model barely moved → MARKET_OVERREACTION on the side opposite the
+  # market's direction.
+  overreaction_market_move: 0.06
+  overreaction_model_move: 0.020
+
+# ---------------------------------------------------------------------
+# Trading thresholds. Conservative on purpose — table-tennis books are
+# thinner than tennis and the live model is new, so we'd rather print
+# fewer signals than fire on noise. Slippage of 3% covers half-spread
+# + book-walk on a small order in a typical WTT match book.
+# ---------------------------------------------------------------------
+trading:
+  slippage_pct: 0.03
+  small_edge_min: 0.05
+  strong_edge_min: 0.09
+  min_ev: 0.025
+  # Avoid extreme prices — a 95% YES is a thin gain even when our model
+  # says 98%, and our calibration error at the tails is wide.
+  min_market_prob: 0.10
+  max_market_prob: 0.90
+  # Volatility cap — match-point / deuce can push past this; we wait
+  # for the rally to settle before firing.
+  max_tradable_volatility: 0.55
+  bet_size: 1.0
+
+# ---------------------------------------------------------------------
+# Dashboard. Stdlib http.server (no Flask dependency) — same pattern as
+# the trading-dashboard project on the droplet. Port 8091 to avoid
+# colliding with the tennis dashboard (8090) when both run on the same
+# droplet during local testing.
+# ---------------------------------------------------------------------
+dashboard:
+  host: "0.0.0.0"
+  port: 8091
+  refresh_seconds: 60
+  title: "Table Tennis Forecast"
+
+# Kalshi series tickers to poll. Table tennis on Kalshi is published
+# under a small number of series; the live monitor iterates each and
+# collapses two-sided markets into match-level records. Add tickers
+# here as Kalshi launches new ones — the rest of the code is series-
+# agnostic.
+kalshi:
+  series:
+    - KXTABLETENNIS
+    - KXWTTSGLES
+    - KXATTABLE

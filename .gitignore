@@ -1,0 +1,47 @@
+# --- secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# --- python ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# --- runtime data ---
+# live_state.json is written by the live monitor each tick from real
+# Kalshi market data; never committed.
+data/raw/*
+!data/raw/.gitkeep
+!data/raw/seed_matches.csv
+data/processed/*
+!data/processed/.gitkeep
+data/outputs/*
+!data/outputs/.gitkeep
+*.log
+*.jsonl
+
+# --- model artifacts ---
+artifacts/
+*.joblib
+*.pkl
+
+# --- OS / editor ---
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# --- notebooks ---
+.ipynb_checkpoints/

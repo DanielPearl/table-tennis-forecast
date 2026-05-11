@@ -1,0 +1,27 @@
+# Table Tennis Forecast — Python deps. Same conservative pinning as the
+# Tennis Forecast sibling so the droplet's pip-cached wheels are reusable.
+# The model is a logistic / GBT ensemble fed by a deliberately broad
+# feature panel — no deep-learning stack required.
+
+# Core data + numerics
+pandas>=2.1
+numpy>=1.26
+scipy>=1.11
+PyYAML>=6.0
+
+# ML
+scikit-learn>=1.4
+joblib>=1.3
+
+# Boosting — sklearn's HistGradientBoostingClassifier is the default;
+# xgboost is supported by the trainer but not pinned here (300MB of GPU
+# libs are wasteful on the droplet). Install manually if desired.
+
+# HTTP — used for the optional external data pulls
+requests>=2.31
+python-dotenv>=1.0
+
+# Kalshi SDK — installed editable from the shared sibling repo on the
+# droplet (/root/kalshi_sdk). Without this, the live monitor can't
+# fetch real KXATTABLE / KXTABLETENNIS markets.
+-e ../kalshi_sdk

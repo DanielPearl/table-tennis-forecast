@@ -1,0 +1,18 @@
+[Unit]
+Description=Table Tennis Forecast live monitor (re-runs the model each tick)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/table-tennis-forecast
+Environment=PYTHONUNBUFFERED=1
+# Kalshi creds piggyback on the gas-bot's .env (shared across all bots).
+EnvironmentFile=-/root/gas-prices/.env
+EnvironmentFile=-/root/table-tennis-forecast/.env
+ExecStart=/root/table-tennis-forecast/.venv/bin/python /root/table-tennis-forecast/scripts/run_live_monitor.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
