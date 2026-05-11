@@ -150,6 +150,9 @@ trading:
   # fire only when there's enough depth to actually fill.
   min_open_interest: 75
   max_spread_cents: 6
+  # Hard cap on simultaneous open paper positions. The simulator ranks
+  # every eligible row by edge × EV and opens only the top N each tick.
+  max_open_positions: 10
   bet_size: 1.0
 
 # ---------------------------------------------------------------------
