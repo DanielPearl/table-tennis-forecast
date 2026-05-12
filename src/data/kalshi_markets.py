@@ -200,20 +200,20 @@ def fetch_table_tennis_markets(
         series = list(cfg.get("kalshi", {}).get("series") or [])
     c = _client()
     out: list[dict] = []
-    dropped_non_wtt = 0
+    dropped = 0
     for s in series:
         try:
             for m in c.iter_open_markets(series_ticker=s):
-                if _is_wtt_event(m):
+                if _is_team_match(m):
                     out.append(m)
                 else:
-                    dropped_non_wtt += 1
+                    dropped += 1
         except Exception as exc:  # noqa: BLE001
             log.warning("fetch %s failed: %s", s, exc)
         time.sleep(inter_series_pause_s)
-    log.info("fetched %d WTT table-tennis markets across %d series "
-             "(dropped %d non-WTT)",
-             len(out), len(list(series)), dropped_non_wtt)
+    log.info("fetched %d table-tennis markets across %d series "
+             "(dropped %d off-tour)",
+             len(out), len(list(series)), dropped)
     return out
 
 
@@ -238,23 +238,17 @@ def _parse_tournament_title(title: str) -> dict[str, str]:
     }
 
 
-def _is_wtt_event(market: dict) -> bool:
-    """Return True if the market's title or rules clearly mark it as a
-    WTT (World Table Tennis) tour event.
-
-    The user's bot is scoped to WTT only — ITTF World Team
-    Championships (the bulk of Kalshi's historical table-tennis
-    markets) and other circuits are filtered out at fetch time so the
-    watchlist + simulator never operate on them, even if Kalshi opens
-    new books in the ITTF series.
-    """
+def _is_team_match(market: dict) -> bool:
+    """ITTF World Team Championships markets are team-vs-team
+    head-to-head books (Tahiti vs Moldova, etc.) — same shape as an
+    individual match, but the 'players' are countries. We accept these
+    plus any individual-match books (WTT, future tour events) by
+    matching on the standard 'Will X win the Y vs Z' pattern, which
+    covers both."""
     text = ((market.get("title") or "") + " "
             + (market.get("rules_primary") or "")).lower()
-    if "wtt" in text:
-        return True
-    if "world table tennis" in text:
-        return True
-    return False
+    return ("table tennis" in text or "wtt" in text
+             or "ittf" in text or "world table tennis" in text)
 
 
 def collapse_to_matches(markets: list[dict],

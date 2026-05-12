@@ -164,6 +164,20 @@ def predict_with_elo_only(player_a: str, player_b: str,
     return {"prob_a": p, "prob_b": 1.0 - p, "elo_winprob_a": f["elo_winprob_a"]}
 
 
+def players_known(player_a: str, player_b: str) -> tuple[bool, bool]:
+    """Return (a_known, b_known) — whether each player exists in the
+    persisted Elo state. Used by the exporter to decide whether the
+    model has any real opinion on a matchup or whether both sides
+    are defaulting to the 1500 baseline (uninformative)."""
+    try:
+        _ensure_loaded()
+    except Exception:
+        return False, False
+    if _ELO is None:
+        return False, False
+    return (player_a in _ELO.overall, player_b in _ELO.overall)
+
+
 def safe_predict(*args, **kwargs) -> dict[str, Any]:
     try:
         return predict_match(*args, **kwargs)

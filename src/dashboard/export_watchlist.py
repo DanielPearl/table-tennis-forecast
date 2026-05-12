@@ -21,7 +21,7 @@ import pandas as pd
 from ..data.fetch_live_scores import load_live_state
 from ..features.build_live_features import standardize
 from ..models.live_adjustment_model import adjust as live_adjust
-from ..models.predict import safe_predict
+from ..models.predict import players_known, safe_predict
 from ..trading.buy_gate import evaluate as evaluate_buy
 from ..trading.ev import ev as ev_calc
 from ..trading.signals import label_match
@@ -74,13 +74,17 @@ def build_watchlist_records(live_records: list[dict[str, Any]] | None = None
         market_type = raw.get("_market_type") or "match"
         market_prob_a = rec.get("market_prob_a")
 
-        if market_type == "tournament":
-            # Tournament-winner contracts (multi-side futures) don't fit
-            # the head-to-head model. Surface the row with the market
-            # price + no model opinion — edge is 0 by construction, so
-            # the signal layer naturally emits WATCH and the BUY gate
-            # never fires. The user still sees every Kalshi table-tennis
-            # market in the watchlist.
+        a_known, b_known = players_known(rec["player_a"], rec["player_b"])
+        no_model_opinion = (market_type == "tournament"
+                              or not (a_known or b_known))
+        if no_model_opinion:
+            # Either tournament-winner market (no head-to-head shape) or
+            # a head-to-head where neither side is in the Elo state
+            # (e.g. ITTF World Team Championships — the model was
+            # trained on individual-player Elo, has no country
+            # ratings). Surface the row with the market price + no
+            # model opinion — edge = 0 by construction, signals emit
+            # WATCH only, BUY gate never fires.
             pre_prob_a = market_prob_a if market_prob_a is not None else 0.5
             live_prob_a = pre_prob_a
             edge_a = 0.0 if market_prob_a is not None else None
@@ -92,10 +96,12 @@ def build_watchlist_records(live_records: list[dict[str, Any]] | None = None
                 volatility_score=0.05, injury_news_flag=False,
                 market_overreaction=False, rules_fired=[],
             )
+            reason = ("tournament-winner market — informational only"
+                       if market_type == "tournament"
+                       else f"no Elo data for {rec['player_a']} or "
+                            f"{rec['player_b']} — model has no opinion")
             sig = SimpleNamespace(
-                label="WATCH",
-                reason="tournament-winner market — informational only",
-                confidence_score=0.5,
+                label="WATCH", reason=reason, confidence_score=0.5,
             )
         else:
             pre = safe_predict(
