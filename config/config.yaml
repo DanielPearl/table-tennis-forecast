@@ -177,15 +177,13 @@ dashboard:
 # whole tournament outcome, not individual matches.
 kalshi:
   series:
-    # Head-to-head match-level series — the bot's primary target. Each
-    # event is a binary YES-each-player book.
+    # Head-to-head match-level series only — each event is a binary
+    # YES-each-player book the model can actually price. Tournament-
+    # winner series (KXITTFMEN / KXITTFWOMEN) are deliberately excluded:
+    # they're N-way futures the head-to-head model can't generate
+    # meaningful probabilities for, and the user explicitly asked the
+    # watchlist to show individual matches only.
     - KXTABLETENNIS       # generic Table Tennis Match
     - KXITTFMENMATCH      # ITTF Men's match-level
     - KXITTFWOMENMATCH    # ITTF Women's match-level
     - KXTTELITEGAME       # TT Elite Series match-level
-    # Tournament-winner series — one event with N player contenders.
-    # The adapter emits one watchlist row per contender as "Player vs
-    # Field". These don't fit the head-to-head model so the exporter
-    # surfaces them as WATCH only (informational; no buy signals).
-    - KXITTFMEN           # ITTF Men's tournament champion
-    - KXITTFWOMEN         # ITTF Women's tournament champion
