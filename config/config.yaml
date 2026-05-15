@@ -133,25 +133,19 @@ live_rules:
 # + book-walk on a small order in a typical WTT match book.
 # ---------------------------------------------------------------------
 trading:
+  # Unified cautious floor across every Kalshi bot. See
+  # kalshi_sdk.validators.UNIFIED_VALIDATOR_DEFAULTS for the rationale.
+  # Prob bounds 25-75c, min EV 0.03, min edge 0.05, max entry 70c, spread 6c.
   slippage_pct: 0.03
   small_edge_min: 0.05
   strong_edge_min: 0.09
-  min_ev: 0.025
-  # Avoid extreme prices — a 95% YES is a thin gain even when our model
-  # says 98%, and our calibration error at the tails is wide.
-  min_market_prob: 0.10
-  max_market_prob: 0.90
-  # Volatility cap — match-point / deuce can push past this; we wait
-  # for the rally to settle before firing.
+  min_ev: 0.03
+  min_market_prob: 0.25
+  max_market_prob: 0.75
+  max_entry_price_cents: 70
   max_tradable_volatility: 0.55
-  # Liquidity / spread validations. The simulator's BUY gate requires
-  # the book to clear both before opening a paper position. Tighter than
-  # tennis because table-tennis books are typically thinner — we want to
-  # fire only when there's enough depth to actually fill.
-  min_open_interest: 75
+  min_open_interest: 50
   max_spread_cents: 6
-  # Hard cap on simultaneous open paper positions. The simulator ranks
-  # every eligible row by edge × EV and opens only the top N each tick.
   max_open_positions: 10
   bet_size: 1.0
 
