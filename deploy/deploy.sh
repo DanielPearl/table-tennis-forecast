@@ -31,13 +31,10 @@ fi
 echo "[deploy] training pre-match model — first run takes a few minutes"
 python scripts/run_daily_prematch.py
 
-cp deploy/table-tennis-dashboard.service /etc/systemd/system/
 cp deploy/table-tennis-monitor.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now table-tennis-dashboard
 systemctl enable --now table-tennis-monitor
 
 echo
-echo "[deploy] up — dashboard on :8091, live monitor running"
-echo "[deploy] logs:  journalctl -u table-tennis-dashboard -f"
-echo "[deploy]        journalctl -u table-tennis-monitor -f"
+echo "[deploy] up — live monitor running; dashboard served by trading-dashboard"
+echo "[deploy] logs:  journalctl -u table-tennis-monitor -f"

@@ -39,10 +39,7 @@ table-tennis-forecast/
 │   ├── run_live_monitor.py          # tick loop
 │   ├── run_backtest.py
 │   └── generate_seed_data.py        # regenerates seed CSV (committed)
-├── app/
-│   └── dashboard.py                 # stdlib http.server fallback
 └── deploy/
-    ├── table-tennis-dashboard.service
     ├── table-tennis-monitor.service
     └── deploy.sh
 ```
@@ -107,13 +104,13 @@ python scripts/generate_seed_data.py
 # 2) train + export
 python scripts/run_daily_prematch.py
 
-# 3) standalone dashboard (port 8091)
-python app/dashboard.py
+# 3) live-monitor loop that refreshes watchlist.json on a tick
+python scripts/run_live_monitor.py
 ```
 
-The primary UI is the multi-bot trading dashboard on the droplet
-(http://178.128.145.111:8080); the standalone dashboard is for local
-development and as a fallback.
+The UI is served by the multi-bot trading dashboard on the droplet
+(http://178.128.145.111:8080); this bot writes the watchlist JSON the
+dashboard reads.
 
 ## Deploying to the DigitalOcean droplet
 
@@ -130,5 +127,5 @@ To redeploy:
 ssh root@178.128.145.111
 cd /root/table-tennis-forecast
 git pull
-systemctl restart table-tennis-monitor table-tennis-dashboard
+systemctl restart table-tennis-monitor
 ```
