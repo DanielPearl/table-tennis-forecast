@@ -169,6 +169,9 @@ def build_watchlist_records(live_records: list[dict[str, Any]] | None = None
             "title_b": raw.get("title_b"),
             "title": (raw.get("title_a") if (edge_a or 0) >= 0
                        else raw.get("title_b")),
+            # Kalshi event-page heading — passed through so the
+            # dashboard's Title column matches the click target.
+            "event_title": raw.get("event_title"),
         }
         decision = evaluate_buy(row, cfg.get("trading") or {})
         row["buy_eligible"] = bool(decision.eligible)

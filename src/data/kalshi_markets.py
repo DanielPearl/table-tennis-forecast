@@ -407,6 +407,13 @@ def collapse_to_matches(markets: list[dict],
             "spread_cents": _spread_cents(a_market),
             "title_a": a_market.get("title"),
             "title_b": (b_market.get("title") if b_market else None),
+            # Kalshi event-page heading ("LastA vs LastB") — derived
+            # from the title parse rather than a per-event API call.
+            "event_title": (
+                f"{a_title.get('lastA', '')} vs {a_title.get('lastB', '')}".strip()
+                if a_title.get("lastA") and a_title.get("lastB")
+                else None
+            ),
         })
     return out
 
