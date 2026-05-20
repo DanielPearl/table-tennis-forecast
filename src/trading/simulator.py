@@ -119,14 +119,13 @@ def _pick_side(model_prob_a: float, market_prob_a: float | None
 
 
 def _within_cooldown(state: dict[str, Any], match_id: str) -> bool:
-    last = state.get("last_settled_at_by_match_id", {}).get(match_id)
-    if not last:
-        return False
-    try:
-        ts = datetime.fromisoformat(last.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return False
-    return (datetime.now(timezone.utc) - ts).total_seconds() < _SAME_MATCH_COOLDOWN_SECONDS
+    """One-shot-per-ticker guard. See tennis simulator for rationale —
+    short summary: a time-based cooldown lets the bot flap-trade the
+    same match 3-5 times after each hedge close, churning slippage
+    for net negative P&L. ``last_settled_at_by_match_id`` having an
+    entry at all is enough to block re-entry on the same match.
+    """
+    return bool(state.get("last_settled_at_by_match_id", {}).get(match_id))
 
 
 def _settle_position(p: dict[str, Any], live_record: dict[str, Any],
