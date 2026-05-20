@@ -354,6 +354,14 @@ def tick(watchlist_rows: list[dict[str, Any]],
             if r.get("buy_eligible") and r.get("match_id")),
         key=lambda r: -float(r.get("buy_score") or 0),
     )
+    # Don't open on matches whose expected_expiration_time has passed
+    # (or is within the buffer) — Kalshi sometimes leaves markets in
+    # ``status=active`` for hours past the match's listed close,
+    # waiting on the official-result entry. See tennis simulator for
+    # the rationale.
+    min_minutes_to_close = float(
+        t.get("min_minutes_to_close_for_open", 30.0))
+    now_ts = datetime.now(timezone.utc).timestamp()
     for r in ranked:
         if len(state["open_positions"]) >= max_open:
             break
@@ -362,6 +370,20 @@ def tick(watchlist_rows: list[dict[str, Any]],
             continue
         if _within_cooldown(state, match_id):
             continue
+        live = live_by_id.get(match_id) or {}
+        exp = live.get("expected_expiration_time")
+        if exp:
+            try:
+                exp_ts = datetime.fromisoformat(
+                    str(exp).replace("Z", "+00:00")).timestamp()
+                mins_left = (exp_ts - now_ts) / 60.0
+                if mins_left < min_minutes_to_close:
+                    log.info("skip open %s — only %.1fmin to close "
+                              "(threshold %.0fmin)",
+                              match_id, mins_left, min_minutes_to_close)
+                    continue
+            except (TypeError, ValueError):
+                pass
         decision = evaluate_buy(r, t)
         if not decision.eligible:
             continue
