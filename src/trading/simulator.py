@@ -193,8 +193,14 @@ def _settle_orphans_from_kalshi(state: dict[str, Any],
                          event_ticker, str(exc)[:140])
             still_open.append(p)
             continue
+        # Kalshi walks resolved markets through closed → settled →
+        # finalized over hours. Accept any terminal status — matches
+        # collapse_to_matches's ``is_closed`` check in kalshi_markets.py.
+        # Previously this required exactly "finalized", which left
+        # zombie positions open for days.
         if not markets or any(
-            (m.get("status") or "").lower() != "finalized" for m in markets
+            (m.get("status") or "").lower() not in {"closed", "settled", "finalized"}
+            for m in markets
         ):
             still_open.append(p)
             continue
@@ -230,6 +236,7 @@ def _settle_orphans_from_kalshi(state: dict[str, Any],
                   closed["won"], closed["realized_pnl"])
     state["open_positions"] = still_open
     if closed_records:
+        log.info("orphan sweep settled %d position(s)", len(closed_records))
         state["closed_positions"] = (state.get("closed_positions")
                                        or []) + closed_records
     return closed_records
