@@ -28,8 +28,12 @@ from ..utils.logging_setup import setup_logging
 log = setup_logging("data.kalshi_markets")
 
 
+# lastA/lastB non-greedy multi-word, terminated by " vs " and ":" —
+# handles compound surnames like "Moro Canas" / "van der Meer" that
+# ``[^\s]+`` would silently fail on (returning empty player_b on the
+# downstream watchlist row).
 _TITLE_RE = re.compile(
-    r"^Will (?P<player>.+?) win the (?P<lastA>[^\s]+) vs (?P<lastB>[^\s]+):"
+    r"^Will (?P<player>.+?) win the (?P<lastA>.+?) vs (?P<lastB>.+?):"
     r"\s*(?P<round>[^?]+) match\?\s*$"
 )
 
