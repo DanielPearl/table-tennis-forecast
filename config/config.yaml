@@ -55,9 +55,12 @@ elo:
   style_blend: 0.25
 
 model:
-  # Held-out evaluation window. 12 months keeps the test set on the
-  # current player pool and the current ball / rule generation.
-  test_window_months: 12
+  # Held-out evaluation window. The ahartness archive's match density
+  # is heavily concentrated in Dec 2024 / Jan 2025 (that's when the
+  # upstream scraping ran), so a 12-month window puts ~85% of matches
+  # into test — backwards. 2 months gives a clean ~66/34 split
+  # (~8.7k train / 4.5k test rows after player-A orientation).
+  test_window_months: 2
   random_state: 42
   # Broad initial feature panel. The trainer prunes anything whose
   # walk-forward permutation importance is consistently negative or
