@@ -23,6 +23,7 @@ from typing import Any
 from ..features.build_live_features import (
     market_move, momentum_score, volatility_signals,
 )
+from ..models import predict_inmatch
 from ..utils.config import load_config
 
 
@@ -34,6 +35,8 @@ class LiveAdjustment:
     injury_news_flag: bool
     market_overreaction: bool
     rules_fired: list[str] = field(default_factory=list)
+    model_prob_a: float | None = None
+    rules_prob_a: float | None = None
 
 
 def _clamp(p: float, lo: float = 0.01, hi: float = 0.99) -> float:
@@ -145,18 +148,44 @@ def adjust(pre_match_prob_a: float, live_record: dict[str, Any],
     # Tail volatility floor — even calm matches carry some uncertainty.
     volatility = min(1.0, max(0.05, volatility))
 
-    live_prob_a = _clamp(pre_match_prob_a + delta)
+    rules_prob_a = _clamp(pre_match_prob_a + delta)
+
+    # ── 4b) Trained in-match model (replaces rules nudge if enabled) ───
+    # The model was trained on per-set snapshots from the TTelite
+    # archive; on test fold it beat the rules layer by 23.8% Brier.
+    # We keep the rules layer running so the dashboard's audit string
+    # (rules_fired, volatility, injury) stays populated even when the
+    # model is on — only the numerical live_prob_a comes from the model.
+    model_prob_a: float | None = None
+    if bool(rules.get("use_trained_inmatch_model", False)):
+        model_prob_a = predict_inmatch.predict(live_record)
+    if model_prob_a is not None:
+        prog = float(live_record.get("progress") or
+                     ((a_sets + b_sets) / max(float(rules.get("best_of_default", 5)), 1.0)))
+        # Progress-weighted blend with pre-match prior — same schedule
+        # as tennis: model dominates once we're past the first set or so.
+        w_model = max(0.0, min(1.0, 0.2 + 1.2 * prog))
+        live_prob_a = _clamp(w_model * model_prob_a +
+                              (1.0 - w_model) * pre_match_prob_a)
+        fired.append(
+            f"in-match model {model_prob_a*100:.1f}% blended w={w_model:.2f} "
+            f"with pre-match {pre_match_prob_a*100:.1f}%"
+        )
+        effective_delta = live_prob_a - pre_match_prob_a
+    else:
+        live_prob_a = rules_prob_a
+        effective_delta = delta
 
     # ── 5) Market overreaction detection ───────────────────────────────
     move = market_move(live_record)
     overreaction = False
     if move is not None:
         if (abs(move) >= rules["overreaction_market_move"]
-                and abs(delta) < rules["overreaction_model_move"]):
+                and abs(effective_delta) < rules["overreaction_model_move"]):
             overreaction = True
             fired.append(
                 f"market moved {move*100:+.1f}pp but model only "
-                f"{delta*100:+.1f}pp — possible overreaction"
+                f"{effective_delta*100:+.1f}pp — possible overreaction"
             )
 
     return LiveAdjustment(
@@ -166,4 +195,6 @@ def adjust(pre_match_prob_a: float, live_record: dict[str, Any],
         injury_news_flag=injury,
         market_overreaction=overreaction,
         rules_fired=fired,
+        model_prob_a=model_prob_a,
+        rules_prob_a=rules_prob_a,
     )

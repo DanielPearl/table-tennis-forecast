@@ -33,6 +33,14 @@ _FIELDS_NUMERIC: list[str] = [
     "market_prob_a", "market_prob_a_prev",
     "open_interest", "volume",
     "spread_cents",
+    # Additional state surfaced for the trained in-match model
+    # (predict_inmatch.py). Optional everywhere else — the rules
+    # layer never reads them.
+    "current_set",
+    "progress",
+    "deuce_games_a", "deuce_games_b",
+    "first_set_winner_a",
+    "ran_up_a", "ran_up_b",
 ]
 _FIELDS_FLAGS: list[str] = [
     "is_deuce",
