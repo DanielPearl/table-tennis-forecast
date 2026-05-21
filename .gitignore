@@ -24,7 +24,6 @@ dist/
 # Kalshi market data; never committed.
 data/raw/*
 !data/raw/.gitkeep
-!data/raw/seed_matches.csv
 data/processed/*
 !data/processed/.gitkeep
 data/outputs/*
