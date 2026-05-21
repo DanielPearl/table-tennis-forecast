@@ -1,18 +1,12 @@
-"""Match-history loader for the table-tennis bot — DISABLED.
+"""Match-history loader for the table-tennis bot.
 
-There is no free, zero-risk public archive of per-match table tennis
-results comparable to ``JeffSackmann/tennis_atp`` (regular tennis) or
-``wonderkiduk/darts_data`` (PDC darts).
+Real-data source: ``ahartness/table-tennis-bet-analyzer`` on GitHub
+(see ``ttelite_archive.py``). The upstream archive publishes JSON
+snapshots of TT Elite Series betting analysis whose embedded
+head-to-head history we parse into a per-match panel.
 
-The closest free GitHub source — ``romanzdk/ittf-data-scrape`` — only
-carries weekly ITTF rankings, not match outcomes. Without match
-outcomes there is nothing to train a "who wins?" classifier on.
-
-The previous synthetic seed (~6000 simulated matches with fictional
-players like "Felix FRA39") has been removed. Calling ``fetch_all``
-raises immediately. Re-enable the bot by wiring up a real per-match
-source (e.g. a paid BetsAPI subscription that covers TT Elite Series
-and ITTF events).
+The previous synthetic ``seed_matches.csv`` shim has been removed —
+the bot trains exclusively on real TT Elite matches.
 """
 from __future__ import annotations
 
@@ -20,7 +14,9 @@ from pathlib import Path
 
 import pandas as pd
 
+from ..utils.config import load_config, resolve_path
 from ..utils.logging_setup import setup_logging
+from .ttelite_archive import fetch_archive_matches
 
 log = setup_logging("data.fetch_matches")
 
@@ -36,25 +32,35 @@ _EXPECTED_COLS = [
 ]
 
 
-class TableTennisDataUnavailable(RuntimeError):
-    """Raised when the bot is asked for training data but no real
-    source is configured."""
-
-
 def fetch_all() -> pd.DataFrame:
-    raise TableTennisDataUnavailable(
-        "No real table-tennis match data is available from free public "
-        "sources. The synthetic seed has been removed. Configure a paid "
-        "provider (BetsAPI, Sportradar, etc.) to re-enable training."
-    )
+    """Return the per-match DataFrame the trainer consumes.
+
+    Pulled from the ahartness/table-tennis-bet-analyzer GitHub
+    archive. Schema matches ``_EXPECTED_COLS``; any optional columns
+    missing in the upstream data are zero-filled.
+    """
+    df = fetch_archive_matches()
+    for col in _EXPECTED_COLS:
+        if col not in df.columns:
+            df[col] = 0
+    df = df[_EXPECTED_COLS].copy()
+    df["match_date"] = pd.to_datetime(df["match_date"], errors="coerce")
+    df = df.dropna(subset=["match_date", "winner_name", "loser_name"])
+    df = df.sort_values("match_date").reset_index(drop=True)
+    log.info("loaded %d real TT Elite matches from ahartness archive",
+              len(df))
+    return df
 
 
 def save_clean(matches: pd.DataFrame) -> Path:
-    raise TableTennisDataUnavailable(
-        "save_clean called but no real data source is configured — "
-        "see fetch_matches.fetch_all docstring."
-    )
+    cfg = load_config()
+    out = resolve_path(cfg["paths"]["processed_dir"]) / "matches_clean.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    matches.to_csv(out, index=False)
+    log.info("wrote %s (%d rows)", out, len(matches))
+    return out
 
 
 if __name__ == "__main__":
-    print(fetch_all())
+    df = fetch_all()
+    save_clean(df)
