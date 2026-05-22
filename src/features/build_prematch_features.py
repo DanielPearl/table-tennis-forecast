@@ -115,13 +115,18 @@ def _per_match_stats(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _rolling_features(df: pd.DataFrame) -> tuple[pd.DataFrame, dict, dict]:
+def _rolling_features(df: pd.DataFrame) -> tuple[pd.DataFrame, dict, dict, dict]:
     """Per-player rolling form / point-rate / volatility / comeback /
     h2h, computed in chronological order with no in-row leakage.
 
     The output adds columns for every player on every row using only
     state that was known BEFORE this match. Buffers are updated after
     the row's features are recorded.
+
+    Returns ``(df, h2h_table, last_match_date, player_history)`` where
+    ``player_history`` is the per-player buffer state at the end of the
+    panel — predict.py reads it so inference doesn't have to default
+    every rolling feature to zero.
     """
     df = df.sort_values("match_date").reset_index(drop=True)
 
@@ -140,10 +145,21 @@ def _rolling_features(df: pd.DataFrame) -> tuple[pd.DataFrame, dict, dict]:
     h2h: dict[tuple[str, str], int] = defaultdict(int)
     h2h_last5: dict[tuple[str, str], deque] = defaultdict(lambda: deque(maxlen=5))
 
+    # New buffers: strength-of-schedule, momentum, format/tier splits.
+    opp_elo_buf: dict[str, deque] = defaultdict(lambda: deque(maxlen=10))
+    elo_hist: dict[str, deque] = defaultdict(lambda: deque(maxlen=11))  # 10 deltas
+    win_streak: dict[str, int] = defaultdict(int)
+    matches_total: dict[str, int] = defaultdict(int)
+    wins_total: dict[str, int] = defaultdict(int)
+    bo7_form_buf: dict[str, deque] = defaultdict(lambda: deque(maxlen=10))
+    bo5_form_buf: dict[str, deque] = defaultdict(lambda: deque(maxlen=10))
+    tier_form_buf: dict[tuple[str, str], deque] = defaultdict(lambda: deque(maxlen=10))
+
     cols = {
         "w_form_last5": [], "l_form_last5": [],
         "w_form_last10": [], "l_form_last10": [],
         "w_form_last20": [], "l_form_last20": [],
+        "w_form_ewm10": [], "l_form_ewm10": [],
         "w_avg_point_win_pct_10": [], "l_avg_point_win_pct_10": [],
         "w_std_point_win_pct_10": [], "l_std_point_win_pct_10": [],
         "w_avg_game_margin_10": [], "l_avg_game_margin_10": [],
@@ -153,6 +169,14 @@ def _rolling_features(df: pd.DataFrame) -> tuple[pd.DataFrame, dict, dict]:
         "w_comeback_rate_20": [], "l_comeback_rate_20": [],
         "w_days_rest": [], "l_days_rest": [],
         "w_matches_last_7d": [], "l_matches_last_7d": [],
+        # New columns
+        "w_opp_avg_elo_10": [], "l_opp_avg_elo_10": [],
+        "w_elo_momentum_10": [], "l_elo_momentum_10": [],
+        "w_win_streak": [], "l_win_streak": [],
+        "w_career_win_pct": [], "l_career_win_pct": [],
+        "w_career_matches": [], "l_career_matches": [],
+        "w_tier_form_10": [], "l_tier_form_10": [],
+        "w_bo_form_10": [], "l_bo_form_10": [],
         "h2h_w_wins_minus_l_wins": [],
         "h2h_w_wins_last5": [],
         "h2h_meetings_last5": [],
@@ -164,9 +188,23 @@ def _rolling_features(df: pd.DataFrame) -> tuple[pd.DataFrame, dict, dict]:
     def _std(buf: deque, default: float = 0.05) -> float:
         return float(np.std(buf)) if len(buf) >= 2 else default
 
+    def _ewm(buf: deque, alpha: float = 0.4, default: float = 0.5) -> float:
+        """Exponentially-weighted mean (most recent gets the highest weight)."""
+        if not buf:
+            return default
+        vals = list(buf)
+        w = [(1 - alpha) ** (len(vals) - 1 - i) for i in range(len(vals))]
+        s = float(sum(w))
+        return float(sum(v * wi for v, wi in zip(vals, w)) / s) if s > 0 else default
+
+    def _streak_capped(n: int, cap: int = 10) -> float:
+        return float(max(-cap, min(cap, n)))
+
     for _, row in df.iterrows():
         w, l = row["winner_name"], row["loser_name"]
         date = row["match_date"]
+        bo = int(row.get("best_of") or 7)
+        tier = str(row.get("tournament_level") or "OT").upper()
 
         cols["w_form_last5"].append(_avg(win5[w], 0.5))
         cols["l_form_last5"].append(_avg(win5[l], 0.5))
@@ -174,6 +212,8 @@ def _rolling_features(df: pd.DataFrame) -> tuple[pd.DataFrame, dict, dict]:
         cols["l_form_last10"].append(_avg(win10[l], 0.5))
         cols["w_form_last20"].append(_avg(win20[w], 0.5))
         cols["l_form_last20"].append(_avg(win20[l], 0.5))
+        cols["w_form_ewm10"].append(_ewm(win10[w]))
+        cols["l_form_ewm10"].append(_ewm(win10[l]))
 
         cols["w_avg_point_win_pct_10"].append(_avg(pointwin_buf[w], 0.50))
         cols["l_avg_point_win_pct_10"].append(_avg(pointwin_buf[l], 0.50))
@@ -203,6 +243,50 @@ def _rolling_features(df: pd.DataFrame) -> tuple[pd.DataFrame, dict, dict]:
         # Matches in last 7 days
         cols["w_matches_last_7d"].append(_count_within_days(recent_dates[w], date, 7))
         cols["l_matches_last_7d"].append(_count_within_days(recent_dates[l], date, 7))
+
+        # Strength-of-schedule — avg Elo of recent opponents (defaults to
+        # the base rating so an unknown player reads as "average opp").
+        default_elo = 1500.0
+        cols["w_opp_avg_elo_10"].append(_avg(opp_elo_buf[w], default_elo))
+        cols["l_opp_avg_elo_10"].append(_avg(opp_elo_buf[l], default_elo))
+
+        # Elo momentum — current Elo minus Elo from up to 10 matches ago.
+        # Captures "trending up" vs "trending down" without changing the
+        # underlying Elo system. Uses the pre-match Elo (added by
+        # build_elo_features upstream) for the *current* read.
+        cur_w_elo = float(row.get("winner_elo_pre") or default_elo)
+        cur_l_elo = float(row.get("loser_elo_pre") or default_elo)
+        w_hist = elo_hist[w]
+        l_hist = elo_hist[l]
+        cols["w_elo_momentum_10"].append(cur_w_elo - (w_hist[0] if w_hist else cur_w_elo))
+        cols["l_elo_momentum_10"].append(cur_l_elo - (l_hist[0] if l_hist else cur_l_elo))
+
+        # Win streak (signed: + for consecutive wins, − for consecutive losses)
+        cols["w_win_streak"].append(_streak_capped(win_streak[w]))
+        cols["l_win_streak"].append(_streak_capped(win_streak[l]))
+
+        # Career win rate (laplace-smoothed so a 1-1 player ≠ 1.0)
+        def _wr(player: str) -> float:
+            m = matches_total[player]
+            if m == 0:
+                return 0.5
+            return float((wins_total[player] + 2.0) / (m + 4.0))
+        cols["w_career_win_pct"].append(_wr(w))
+        cols["l_career_win_pct"].append(_wr(l))
+        cols["w_career_matches"].append(float(matches_total[w]))
+        cols["l_career_matches"].append(float(matches_total[l]))
+
+        # Tier-specific form
+        cols["w_tier_form_10"].append(_avg(tier_form_buf[(w, tier)], 0.5))
+        cols["l_tier_form_10"].append(_avg(tier_form_buf[(l, tier)], 0.5))
+
+        # Best-of-specific form (bo7 vs bo5 — same player can swing 5-7pp)
+        if bo >= 7:
+            cols["w_bo_form_10"].append(_avg(bo7_form_buf[w], 0.5))
+            cols["l_bo_form_10"].append(_avg(bo7_form_buf[l], 0.5))
+        else:
+            cols["w_bo_form_10"].append(_avg(bo5_form_buf[w], 0.5))
+            cols["l_bo_form_10"].append(_avg(bo5_form_buf[l], 0.5))
 
         # H2H (winner-side perspective). We also carry the bounded
         # count of recent meetings so the loser-orientation panel build
@@ -244,6 +328,22 @@ def _rolling_features(df: pd.DataFrame) -> tuple[pd.DataFrame, dict, dict]:
         # Loser doesn't get comeback credit
         comeback_buf[l].append(0.0)
 
+        # Update new buffers.
+        opp_elo_buf[w].append(cur_l_elo)
+        opp_elo_buf[l].append(cur_w_elo)
+        elo_hist[w].append(cur_w_elo)
+        elo_hist[l].append(cur_l_elo)
+        win_streak[w] = win_streak[w] + 1 if win_streak[w] >= 0 else 1
+        win_streak[l] = win_streak[l] - 1 if win_streak[l] <= 0 else -1
+        matches_total[w] += 1; matches_total[l] += 1
+        wins_total[w] += 1
+        tier_form_buf[(w, tier)].append(1.0)
+        tier_form_buf[(l, tier)].append(0.0)
+        if bo >= 7:
+            bo7_form_buf[w].append(1.0); bo7_form_buf[l].append(0.0)
+        else:
+            bo5_form_buf[w].append(1.0); bo5_form_buf[l].append(0.0)
+
         last_match_date[w] = date; last_match_date[l] = date
         recent_dates[w].append(date); recent_dates[l].append(date)
         h2h[key] += 1 if key[0] == w else -1
@@ -251,7 +351,29 @@ def _rolling_features(df: pd.DataFrame) -> tuple[pd.DataFrame, dict, dict]:
 
     for k, v in cols.items():
         df[k] = v
-    return df, h2h, last_match_date
+
+    player_history = {
+        "win5": {k: list(v) for k, v in win5.items()},
+        "win10": {k: list(v) for k, v in win10.items()},
+        "win20": {k: list(v) for k, v in win20.items()},
+        "pointwin_10": {k: list(v) for k, v in pointwin_buf.items()},
+        "margin_10": {k: list(v) for k, v in margin_buf.items()},
+        "closing_10": {k: list(v) for k, v in closing_buf.items()},
+        "deuce_10": {k: list(v) for k, v in deuce_buf.items()},
+        "comeback_20": {k: list(v) for k, v in comeback_buf.items()},
+        "opp_elo_10": {k: list(v) for k, v in opp_elo_buf.items()},
+        "elo_hist": {k: list(v) for k, v in elo_hist.items()},
+        "win_streak": dict(win_streak),
+        "matches_total": dict(matches_total),
+        "wins_total": dict(wins_total),
+        "tier_form_10": {f"{k[0]}|{k[1]}": list(v)
+                          for k, v in tier_form_buf.items()},
+        "bo7_form_10": {k: list(v) for k, v in bo7_form_buf.items()},
+        "bo5_form_10": {k: list(v) for k, v in bo5_form_buf.items()},
+        "recent_dates": {k: [pd.Timestamp(d).isoformat() for d in v]
+                          for k, v in recent_dates.items()},
+    }
+    return df, h2h, last_match_date, player_history
 
 
 def _count_within_days(date_buf: deque, ref: pd.Timestamp, days: int) -> int:
@@ -260,12 +382,13 @@ def _count_within_days(date_buf: deque, ref: pd.Timestamp, days: int) -> int:
 
 
 def build_full_panel(matches: pd.DataFrame, elo_cfg: dict | None = None
-                     ) -> tuple[pd.DataFrame, EloState, dict, dict]:
+                     ) -> tuple[pd.DataFrame, EloState, dict, dict, dict]:
     """End-to-end enrichment. Returns the wide panel + trained Elo state
-    + accumulated H2H / last-match-date dicts (used at inference time)."""
+    + accumulated H2H / last-match-date dicts / per-player rolling
+    history (all used at inference time)."""
     df = _per_match_stats(matches)
     df, elo_state = build_elo_features(df, elo_cfg)
-    df, h2h_table, last_match_date = _rolling_features(df)
+    df, h2h_table, last_match_date, player_history = _rolling_features(df)
 
     # Tournament + round encodings (with defaults for missing values).
     df["level_rank"] = df["tournament_level"].fillna("OT").map(_LEVEL_RANK).fillna(1).astype(int)
@@ -282,7 +405,7 @@ def build_full_panel(matches: pd.DataFrame, elo_cfg: dict | None = None
     df["loser_hand_left"] = (df["loser_hand"].fillna("R").str.upper() == "L").astype(int)
     df["hand_matchup_lr"] = (df["winner_hand_left"] != df["loser_hand_left"]).astype(int)
 
-    return df, elo_state, h2h_table, last_match_date
+    return df, elo_state, h2h_table, last_match_date, player_history
 
 
 def build_player_a_panel(panel: pd.DataFrame) -> pd.DataFrame:
@@ -315,6 +438,7 @@ def _attach_oriented(out: pd.DataFrame, side: str, panel: pd.DataFrame) -> None:
         ("form_last5", "w_form_last5", "l_form_last5"),
         ("form_last10", "w_form_last10", "l_form_last10"),
         ("form_last20", "w_form_last20", "l_form_last20"),
+        ("form_ewm10", "w_form_ewm10", "l_form_ewm10"),
         ("avg_point_win_pct_10", "w_avg_point_win_pct_10", "l_avg_point_win_pct_10"),
         ("std_point_win_pct_10", "w_std_point_win_pct_10", "l_std_point_win_pct_10"),
         ("avg_game_margin_10", "w_avg_game_margin_10", "l_avg_game_margin_10"),
@@ -325,6 +449,14 @@ def _attach_oriented(out: pd.DataFrame, side: str, panel: pd.DataFrame) -> None:
         ("days_rest", "w_days_rest", "l_days_rest"),
         ("matches_last_7d", "w_matches_last_7d", "l_matches_last_7d"),
         ("hand_left", "winner_hand_left", "loser_hand_left"),
+        # New rolling features
+        ("opp_avg_elo_10", "w_opp_avg_elo_10", "l_opp_avg_elo_10"),
+        ("elo_momentum_10", "w_elo_momentum_10", "l_elo_momentum_10"),
+        ("win_streak", "w_win_streak", "l_win_streak"),
+        ("career_win_pct", "w_career_win_pct", "l_career_win_pct"),
+        ("career_matches", "w_career_matches", "l_career_matches"),
+        ("tier_form_10", "w_tier_form_10", "l_tier_form_10"),
+        ("bo_form_10", "w_bo_form_10", "l_bo_form_10"),
     ]
     for short, w_col, l_col in pairs:
         if side == "w_to_a":
@@ -370,6 +502,7 @@ PREMATCH_FEATURES_BROAD = [
     "diff_form_last5",
     "diff_form_last10",
     "diff_form_last20",
+    "diff_form_ewm10",
     "diff_avg_point_win_pct_10",
     "diff_std_point_win_pct_10",
     "diff_avg_game_margin_10",
@@ -387,6 +520,14 @@ PREMATCH_FEATURES_BROAD = [
     "is_bo7",
     "diff_hand_left",
     "hand_matchup_lr",
+    # New strength-of-schedule / momentum / specialization features
+    "diff_opp_avg_elo_10",
+    "diff_elo_momentum_10",
+    "diff_win_streak",
+    "diff_career_win_pct",
+    "diff_career_matches",
+    "diff_tier_form_10",
+    "diff_bo_form_10",
 ]
 
 

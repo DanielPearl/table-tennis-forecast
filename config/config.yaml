@@ -55,17 +55,22 @@ elo:
   style_blend: 0.25
 
 model:
-  # Held-out evaluation window. The ahartness archive's match density
-  # is heavily concentrated in Dec 2024 / Jan 2025 (that's when the
-  # upstream scraping ran), so a 12-month window puts ~85% of matches
-  # into test — backwards. 2 months gives a clean ~66/34 split
-  # (~8.7k train / 4.5k test rows after player-A orientation).
-  test_window_months: 2
+  # Held-out evaluation. Prefer ``test_fraction`` (chronological split
+  # at the (1-frac) percentile of match_date) over the legacy
+  # ``test_window_months`` knob — the upstream archive's match density
+  # is uneven across calendar months, so a fixed-month window can put
+  # 60%+ of rows into the test set without anyone noticing.
+  test_fraction: 0.20
+  test_window_months: 2  # legacy fallback only; ignored when test_fraction is set
   random_state: 42
+  # Permutation-importance bookkeeping. ``perm_repeats`` controls how
+  # many shuffles per feature we run — higher means tighter variance
+  # bands but slower training.
+  perm_repeats: 5
   # Broad initial feature panel. The trainer prunes anything whose
   # walk-forward permutation importance is consistently negative or
   # statistically indistinguishable from noise (see
-  # ``src/models/train_prematch_model.py::_prune_noisy_features``).
+  # ``src/models/train_prematch_model.py::_prune_noisy``).
   feature_panel: broad
   ensemble:
     use_xgboost_if_available: true
@@ -73,9 +78,10 @@ model:
     learning_rate: 0.04
     max_depth: 4
   # Permutation-importance pruning. After the broad-panel fit, drop any
-  # feature whose mean importance is below ``prune_floor`` AND whose
-  # variance band crosses zero. Re-fit on the pruned panel and persist
-  # whichever model has the better held-out log-loss.
+  # feature whose mean importance is below ``prune_floor``, whose 1-std
+  # band crosses zero, OR which helped on fewer than 4 of the perm
+  # repeats. Re-fit on the pruned panel and persist whichever model has
+  # the better held-out log-loss.
   prune_floor: 0.0015
   prune_min_features: 6
 

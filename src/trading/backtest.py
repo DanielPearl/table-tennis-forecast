@@ -53,18 +53,25 @@ def run() -> dict:
     feature_list = bundle["feature_list"]
 
     matches = fetch_all()
-    panel, _, _, _ = build_full_panel(matches, elo_cfg=cfg["elo"])
+    panel, _, _, _, _ = build_full_panel(matches, elo_cfg=cfg["elo"])
     oriented = build_player_a_panel(panel)
     oriented = oriented.sort_values("match_date").reset_index(drop=True)
 
-    cutoff_months = int(cfg["model"]["test_window_months"])
-    cutoff = oriented["match_date"].max() - pd.DateOffset(months=cutoff_months)
-    test = oriented[oriented["match_date"] >= cutoff].copy()
-    if test.empty:
-        log.warning("no test rows in last %d months — using last 20%%",
-                    cutoff_months)
-        n = max(1, int(len(oriented) * 0.2))
+    # Mirror the trainer's chronological split: prefer test_fraction,
+    # fall back to test_window_months for legacy configs.
+    test_fraction = cfg["model"].get("test_fraction")
+    if test_fraction is not None:
+        n = max(1, int(len(oriented) * float(test_fraction)))
         test = oriented.iloc[-n:].copy()
+    else:
+        cutoff_months = int(cfg["model"].get("test_window_months", 2))
+        cutoff = oriented["match_date"].max() - pd.DateOffset(months=cutoff_months)
+        test = oriented[oriented["match_date"] >= cutoff].copy()
+        if test.empty:
+            log.warning("no test rows in last %d months — using last 20%%",
+                        cutoff_months)
+            n = max(1, int(len(oriented) * 0.2))
+            test = oriented.iloc[-n:].copy()
 
     X_test = select_features(test, feature_list)
     y_test = test["y"].values

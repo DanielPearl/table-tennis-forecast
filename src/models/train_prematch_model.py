@@ -61,17 +61,34 @@ def _try_xgb():
         return None
 
 
-def _split_by_date(df: pd.DataFrame, months: int):
-    cutoff = df["match_date"].max() - pd.DateOffset(months=months)
-    train = df[df["match_date"] < cutoff].copy()
-    test = df[df["match_date"] >= cutoff].copy()
-    # Guard against degenerate splits on a tiny seed dataset — if
-    # everything ends up on one side, fall back to a 80/20 row split.
+def _split_by_date(df: pd.DataFrame, cfg_model: dict):
+    """Temporal hold-out split.
+
+    Prefers ``model.test_fraction`` (float, 0-1): cut at the
+    chronological percentile that yields that fraction of rows in the
+    test set. Falls back to ``model.test_window_months`` for legacy
+    configs. Either way, if the resulting split is degenerate on a tiny
+    dataset, we collapse to a flat 80/20 row split."""
+    df = df.sort_values("match_date").reset_index(drop=True)
+    test_fraction = cfg_model.get("test_fraction")
+    if test_fraction is not None:
+        frac = float(test_fraction)
+        cut_idx = max(1, int(len(df) * (1.0 - frac)))
+        train = df.iloc[:cut_idx].copy()
+        test = df.iloc[cut_idx:].copy()
+        cutoff = (df.iloc[cut_idx]["match_date"] if cut_idx < len(df)
+                   else df["match_date"].max())
+    else:
+        months = int(cfg_model.get("test_window_months", 2))
+        cutoff = df["match_date"].max() - pd.DateOffset(months=months)
+        train = df[df["match_date"] < cutoff].copy()
+        test = df[df["match_date"] >= cutoff].copy()
     if len(train) < 50 or len(test) < 20:
         cut = max(1, int(len(df) * 0.8))
         train = df.iloc[:cut].copy()
         test = df.iloc[cut:].copy()
-        cutoff = df.iloc[cut]["match_date"] if cut < len(df) else df["match_date"].max()
+        cutoff = (df.iloc[cut]["match_date"] if cut < len(df)
+                   else df["match_date"].max())
     return train, test, cutoff
 
 
@@ -115,7 +132,12 @@ def _fit_pass(features: list[str], X_train: pd.DataFrame, y_train,
                 X_test: pd.DataFrame, y_test, cfg: dict
                 ) -> dict[str, Any]:
     """One end-to-end fit on a specific feature list. Returns the
-    bundle dict (model artefacts + held-out scores)."""
+    bundle dict (model artefacts + held-out scores).
+
+    Blend weights are picked on a *validation slice* carved from the
+    tail of the training data — the same slice used for sigmoid
+    calibration. The held-out test set never influences blend selection.
+    """
     elo_only = [f for f in ("diff_elo_pre", "diff_style_elo_pre")
                  if f in features]
     # Raw Elo differences can run into the thousands once player ratings
@@ -136,8 +158,19 @@ def _fit_pass(features: list[str], X_train: pd.DataFrame, y_train,
     ens_p_test = cal_clf.predict_proba(X_test[features])[:, 1]
     ens_p_train = cal_clf.predict_proba(X_train[features])[:, 1]
 
-    blend_p_test = 0.70 * ens_p_test + 0.30 * base_p_test
-    blend_p_train = 0.70 * ens_p_train + 0.30 * base_p_train
+    # Carve a chronological validation slice from the tail of training
+    # data to pick the blend weight (does NOT touch X_test).
+    n_val = max(50, int(len(X_train) * 0.2))
+    X_val = X_train.iloc[-n_val:]
+    y_val = y_train[-n_val:]
+    val_p_ens = cal_clf.predict_proba(X_val[features])[:, 1]
+    val_p_log = base.predict_proba(X_val[elo_only])[:, 1]
+    w_ens, w_log, val_ll = _select_blend(val_p_ens, val_p_log, y_val)
+    log.info("blend selected on val: w_ens=%.2f w_log=%.2f val_logloss=%.4f",
+             w_ens, w_log, val_ll)
+
+    blend_p_test = w_ens * ens_p_test + w_log * base_p_test
+    blend_p_train = w_ens * ens_p_train + w_log * base_p_train
 
     return {
         "feature_list": features,
@@ -145,8 +178,9 @@ def _fit_pass(features: list[str], X_train: pd.DataFrame, y_train,
         "logistic": base,
         "ensemble_uncalibrated": clf,
         "ensemble": cal_clf,
-        "blend_weight_ensemble": 0.70,
-        "blend_weight_logistic": 0.30,
+        "blend_weight_ensemble": w_ens,
+        "blend_weight_logistic": w_log,
+        "blend_val_logloss": val_ll,
         "metrics": {
             "elo_only": _eval(y_test, base_p_test),
             "ensemble": _eval(y_test, ens_p_test),
@@ -160,6 +194,34 @@ def _fit_pass(features: list[str], X_train: pd.DataFrame, y_train,
         "ens_p_test": ens_p_test,
         "xgboost": used_xgb,
     }
+
+
+def _select_blend(p_ens: np.ndarray, p_log: np.ndarray, y: np.ndarray
+                   ) -> tuple[float, float, float]:
+    """Grid-search the (ensemble, logistic) blend weights on a held-out
+    validation slice. Returns (w_ens, w_log, val_log_loss).
+
+    Includes the pure-ensemble and pure-logistic corners so a single
+    side wins outright when it dominates — the previous hard-coded
+    70/30 dragged the model down whenever the elo-only baseline was
+    actually stronger than the ensemble.
+    """
+    candidates = [
+        (1.00, 0.00),
+        (0.85, 0.15),
+        (0.70, 0.30),
+        (0.50, 0.50),
+        (0.30, 0.70),
+        (0.15, 0.85),
+        (0.00, 1.00),
+    ]
+    best = (0.5, 0.5, float("inf"))
+    for w_e, w_l in candidates:
+        p = np.clip(w_e * p_ens + w_l * p_log, 1e-6, 1 - 1e-6)
+        ll = float(log_loss(y, p))
+        if ll < best[2]:
+            best = (w_e, w_l, ll)
+    return best
 
 
 def _permutation_importance(bundle: dict[str, Any], X_test: pd.DataFrame,
@@ -206,18 +268,26 @@ def _permutation_importance(bundle: dict[str, Any], X_test: pd.DataFrame,
 
 
 def _prune_noisy(importances: list[dict[str, float]],
-                  floor: float, min_features: int) -> tuple[list[str], list[str]]:
+                  floor: float, min_features: int,
+                  min_positive_folds: int = 4) -> tuple[list[str], list[str]]:
     """Return (kept, dropped) feature names.
 
-    Drop any feature whose mean_importance < floor AND whose 1-std band
-    crosses zero (mean - std < 0). Always keep at least ``min_features``
-    by ranking the survivors when too many would be pruned.
+    Drop any feature that fails the noise screen:
+      * mean_importance < floor, OR
+      * 1-std band crosses zero (mean - std < 0), OR
+      * helped on fewer than ``min_positive_folds`` of the permutation
+        repeats (so a feature that randomly looked good in one fold
+        gets cut anyway).
+    Always keep at least ``min_features`` by ranking the survivors when
+    too many would be pruned.
     """
     keep_strong = []
     weak = []
     for r in importances:
         crosses_zero = (r["mean_importance"] - r["std_importance"]) < 0
-        if r["mean_importance"] < floor and crosses_zero:
+        weak_signal = (r["mean_importance"] < floor or crosses_zero
+                        or r.get("positive_folds", 0) < min_positive_folds)
+        if weak_signal:
             weak.append(r)
         else:
             keep_strong.append(r)
@@ -242,15 +312,13 @@ def train_and_persist() -> dict[str, Any]:
     save_clean(matches)
 
     log.info("building feature panel (broad: Elo + form + h2h + ...)")
-    panel, elo_state, h2h_table, last_match_date = build_full_panel(
+    panel, elo_state, h2h_table, last_match_date, player_history = build_full_panel(
         matches, elo_cfg=cfg["elo"]
     )
     oriented = build_player_a_panel(panel)
     oriented = oriented.sort_values("match_date").reset_index(drop=True)
 
-    train, test, cutoff = _split_by_date(
-        oriented, months=int(cfg["model"]["test_window_months"])
-    )
+    train, test, cutoff = _split_by_date(oriented, cfg["model"])
     log.info("train rows %d / test rows %d (cutoff %s)",
              len(train), len(test),
              str(cutoff.date()) if hasattr(cutoff, "date") else cutoff)
@@ -325,6 +393,9 @@ def train_and_persist() -> dict[str, Any]:
         "pruning_chosen": chosen.get("pruning_chosen", "broad"),
         "features_used": chosen["feature_list"],
         "features_pruned": dropped,
+        "blend_weight_ensemble": chosen["blend_weight_ensemble"],
+        "blend_weight_logistic": chosen["blend_weight_logistic"],
+        "blend_val_logloss": chosen.get("blend_val_logloss"),
     }
     log.info("final metrics: %s",
              json.dumps(metrics["blended"], indent=2))
@@ -350,6 +421,10 @@ def train_and_persist() -> dict[str, Any]:
         {k: pd.Timestamp(v).isoformat() for k, v in last_match_date.items()},
         artifacts_dir / "last_match_date.joblib",
     )
+    # Per-player rolling buffers — predict.py uses these to populate
+    # opp_elo / momentum / streak / career-rate / tier-form / bo-form at
+    # inference instead of defaulting them to a neutral prior.
+    joblib.dump(player_history, artifacts_dir / "player_history.joblib")
 
     # ── Coefficients (Elo-only logistic) + ensemble top features ────────
     # Pipeline wraps the LR; the final estimator carries .coef_/.intercept_.

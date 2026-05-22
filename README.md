@@ -50,7 +50,8 @@ table-tennis-forecast/
 Inputs span the broad table-tennis-specific feature panel:
 
 - overall Elo + style-matchup (handedness) Elo
-- rolling form windows (last 5 / 10 / 20 matches)
+- rolling form windows (last 5 / 10 / 20 matches) + exponentially-
+  weighted recent form
 - average + std of point-win % and game-margin (last 10)
 - closing-game win % (last game of a bo5/bo7)
 - deuce conversion rate
@@ -60,13 +61,23 @@ Inputs span the broad table-tennis-specific feature panel:
 - ranking diff, tournament tier, round
 - best-of-5 vs best-of-7 indicator
 - hand matchup (L vs R)
+- strength of schedule: avg Elo of the last 10 opponents
+- Elo momentum: Δ Elo over the last 10 matches
+- current win streak (capped ±10)
+- career win % (Laplace-smoothed) + career match count
+- tier-specific and best-of-specific recent form
 
 We start with the broad panel, train a logistic-baseline + calibrated
 GBT ensemble, then run **walk-forward permutation importance** to
-identify noisy / non-contributing features. Anything below the
-configured prune floor whose 1-std band crosses zero is dropped, and
-the model is re-fit on the survivors. Whichever model has better
-held-out log-loss (broad vs. pruned) is what the live trader uses.
+identify noisy / non-contributing features. Anything that fails the
+noise screen (mean importance below the prune floor, 1-std band crosses
+zero, or didn't help on a majority of perm repeats) is dropped, and
+the model is re-fit on the survivors. The (ensemble, logistic) blend
+weight is picked by grid search on a validation slice carved from the
+tail of training — no longer hard-coded — so when one side dominates
+on the validation data it gets the full weight. Whichever bundle has
+better held-out log-loss (broad vs. pruned) is what the live trader
+uses.
 
 **Live adjustment** — a transparent rules layer (phase 1) that nudges
 the pre-match probability using:
