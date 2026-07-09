@@ -148,15 +148,21 @@ live_rules:
 # + book-walk on a small order in a typical WTT match book.
 # ---------------------------------------------------------------------
 trading:
-  # Unified cautious floor across every Kalshi bot. See
-  # kalshi_sdk.validators.UNIFIED_VALIDATOR_DEFAULTS for the rationale.
-  # Prob bounds 25-75c, min EV 0.03, min edge 0.05, max entry 70c, spread 6c.
+  # 2026-07-09: model-confidence-derived caps stripped out — the
+  # exporter now uses Pinnacle's own line-shopper feed (via the SDK's
+  # ``benchmark_probs_by_pair_with_guest`` cascade) as the reference,
+  # so an edge is a sharp-vs-Kalshi disagreement, not a model belief
+  # that has to be defended with tight gates. Kept the min_ev /
+  # liquidity / spread trio (general market-safety, not model-
+  # confidence), widened the price band from 0.25/0.75 → 0.10/0.90 so
+  # deep-underdog Pinnacle-vs-Kalshi gaps (where the sharpest
+  # inefficiencies show up) can fire.
   slippage_pct: 0.03
-  small_edge_min: 0.05
-  strong_edge_min: 0.09
+  small_edge_min: 0.04
+  strong_edge_min: 0.08
   min_ev: 0.03
-  min_market_prob: 0.25
-  max_market_prob: 0.75
+  min_market_prob: 0.10
+  max_market_prob: 0.90
   max_entry_price_cents: 70
   max_tradable_volatility: 0.55
   min_open_interest: 50
