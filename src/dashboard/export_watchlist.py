@@ -161,7 +161,8 @@ def build_watchlist_records(live_records: list[dict[str, Any]] | None = None
             "reason_for_signal": sig.reason,
             "last_updated": now,
             "open_interest": raw.get("open_interest_a"),
-            "volume": raw.get("volume_a"),
+            "volume": ((raw.get("volume_a") or 0)
+                       + (raw.get("volume_b") or 0)),
             "spread_cents": raw.get("spread_cents"),
             "yes_ask_cents_a": raw.get("yes_ask_cents_a"),
             "yes_ask_cents_b": raw.get("yes_ask_cents_b"),
