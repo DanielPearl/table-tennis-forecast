@@ -166,7 +166,7 @@ trading:
   max_entry_price_cents: 70
   max_tradable_volatility: 0.55
   min_open_interest: 50
-  max_spread_cents: 6
+  max_spread_cents: null  # gate retired 2026-07-15 per user
   max_open_positions: 25  # uniform $1-stake cap (2026-07-10)
   bet_size: 1.0
   # Profit-lock exit: close any open position whose side has drifted
