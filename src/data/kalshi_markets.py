@@ -136,12 +136,17 @@ def _spread_cents(market: dict) -> float | None:
 
 
 def _volume(market: dict) -> float | None:
-    return _to_float(market.get("volume_fp")) or _to_float(market.get("volume"))
+    # NOT ``or`` — 0.0 volume must stay 0.0, not collapse to None.
+    v = _to_float(market.get("volume_fp"))
+    return v if v is not None else _to_float(market.get("volume"))
 
 
 def _open_interest(market: dict) -> float | None:
-    return (_to_float(market.get("open_interest_fp"))
-            or _to_float(market.get("open_interest")))
+    # NOT ``or`` — an OI of 0.0 is falsy, and collapsing it to None
+    # made every untraded market render "—" instead of 0 on the
+    # dashboard's Total-contracts column (2026-09-06).
+    v = _to_float(market.get("open_interest_fp"))
+    return v if v is not None else _to_float(market.get("open_interest"))
 
 
 def _tournament_from_rules(rules: str) -> str:
