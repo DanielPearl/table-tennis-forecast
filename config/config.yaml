@@ -207,4 +207,9 @@ kalshi:
     - KXTABLETENNIS       # generic Table Tennis Match
     - KXITTFMENMATCH      # ITTF Men's match-level
     - KXITTFWOMENMATCH    # ITTF Women's match-level
-    - KXTTELITEGAME       # TT Elite Series match-level
+    - KXTTELITEGAME       # TT Elite Series match-level (retired upstream)
+    # 2026-08-31: Kalshi retired the four series above (all 0 open
+    # markets) and lists TT Elite matches under KXTTELITEMATCH (140
+    # open at time of fix). The old tickers stay for when they return;
+    # fetch_open_markets skips empty series harmlessly.
+    - KXTTELITEMATCH      # TT Elite Series Match — the live series
