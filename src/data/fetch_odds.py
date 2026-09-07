@@ -24,10 +24,23 @@ log = setup_logging("data.fetch_odds")
 
 def pinnacle_probs_by_pair() -> dict[frozenset, dict[str, float]]:
     """``{frozenset({name_a, name_b}): {name_a: prob_a, name_b: prob_b}}``
-    for every table-tennis matchup Pinnacle's guest feed currently
-    quotes. Cached inside the SDK helper."""
+    for every table-tennis matchup a professional book quotes.
+
+    Source cascade (each fills pairs the previous one missed):
+      1. Pinnacle guest feed (free; currently lists no TT but picks
+         itself back up the moment their coverage returns).
+      2. Bet365 via BetsAPI (needs BETSAPI_KEY in the shared env) —
+         the one aggregator that reliably carries TT Elite / Liga Pro.
+    """
+    out: dict[frozenset, dict[str, float]] = {}
     try:
-        return pinnacle_guest_probs_by_pair("table_tennis")
+        out.update(pinnacle_guest_probs_by_pair("table_tennis"))
     except Exception:  # noqa: BLE001 — benchmarks are best-effort
         log.exception("pinnacle guest fetch failed (non-fatal)")
-        return {}
+    try:
+        from .betsapi_odds import betsapi_probs_by_pair
+        for key, probs in betsapi_probs_by_pair().items():
+            out.setdefault(key, probs)
+    except Exception:  # noqa: BLE001
+        log.exception("betsapi fetch failed (non-fatal)")
+    return out
