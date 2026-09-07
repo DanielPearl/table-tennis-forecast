@@ -22,6 +22,7 @@ from ..data.fetch_live_scores import load_live_state
 from ..features.build_live_features import standardize
 from ..models.live_adjustment_model import adjust as live_adjust
 from ..models.predict import players_known, safe_predict
+from ..data.fetch_odds import pinnacle_probs_by_pair
 from ..trading.buy_gate import evaluate as evaluate_buy
 from ..trading.ev import ev as ev_calc
 from ..trading.signals import label_match
@@ -39,6 +40,44 @@ def _format_score(rec: dict[str, Any]) -> str:
 
 def _round_label(level: str, round_: str) -> str:
     return f"{level} / {round_}" if round_ else level
+
+
+def _pinnacle_prob_for(lookup: dict, player_a: str,
+                        player_b: str) -> float | None:
+    """Player-A probability from the Pinnacle pair lookup, or None.
+
+    Same matching as tennis-forecast: exact frozenset first, then a
+    loose last-name scan so a diacritic / initial difference between
+    Kalshi's and Pinnacle's spellings doesn't drop the line. Keys
+    starting with "_" ("_source") are SDK metadata, not names.
+    """
+    if not lookup or not player_a or not player_b:
+        return None
+    pinn_map = lookup.get(frozenset({player_a, player_b}))
+    if pinn_map is None:
+        la = player_a.split()[-1].lower()
+        lb = player_b.split()[-1].lower()
+        for key_set, probs in lookup.items():
+            names = [str(n) for n in key_set
+                     if not str(n).startswith("_")]
+            if len(names) != 2:
+                continue
+            lnames = [n.split()[-1].lower() for n in names]
+            if la in lnames and lb in lnames:
+                pinn_map = probs
+                break
+    if pinn_map is None:
+        return None
+    for name, prob in pinn_map.items():
+        if name == player_a:
+            return float(prob)
+    la = player_a.split()[-1].lower()
+    for name, prob in pinn_map.items():
+        if str(name).startswith("_"):
+            continue
+        if la in str(name).lower():
+            return float(prob)
+    return None
 
 
 def _load_comeback_rates() -> dict[str, float]:
@@ -65,6 +104,11 @@ def build_watchlist_records(live_records: list[dict[str, Any]] | None = None
         live_records = load_live_state()
 
     comeback_rates = _load_comeback_rates()
+
+    # Professional benchmark for the whole batch — Pinnacle's guest
+    # feed quotes the TT Elite / Liga Pro circuits heavily. Cached
+    # inside the SDK helper; empty dict when the feed is down.
+    pinnacle_lookup = pinnacle_probs_by_pair()
 
     out: list[dict[str, Any]] = []
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -133,6 +177,34 @@ def build_watchlist_records(live_records: list[dict[str, Any]] | None = None
                 rules_fired=adj.rules_fired,
             )
 
+        # Sharp-reference override, mirroring tennis (2026-09-07):
+        # when Pinnacle quotes the match, its devigged probability
+        # drives edge / EV / the signal label (and, below, the buy
+        # gate) — the Elo model becomes the fallback reference plus a
+        # disagreement veto. This also gives rows the Elo state has
+        # no opinion on a real, tradeable benchmark.
+        pinnacle_prob_a = _pinnacle_prob_for(
+            pinnacle_lookup, rec["player_a"], rec["player_b"])
+        pinnacle_prob_b = (1.0 - pinnacle_prob_a
+                           if pinnacle_prob_a is not None else None)
+        if pinnacle_prob_a is not None:
+            edge_a = ((pinnacle_prob_a - market_prob_a)
+                      if market_prob_a is not None else None)
+            edge_b = -edge_a if edge_a is not None else None
+            ev_a = (ev_calc(pinnacle_prob_a, market_prob_a,
+                            slip).ev_per_contract
+                    if market_prob_a is not None else None)
+            ev_b = (ev_calc(1 - pinnacle_prob_a, 1 - market_prob_a,
+                            slip).ev_per_contract
+                    if market_prob_a is not None else None)
+            sig = label_match(
+                pinnacle_prob_a, market_prob_a,
+                volatility=adj.volatility_score,
+                injury_flag=bool(adj.injury_news_flag),
+                market_overreaction=bool(adj.market_overreaction),
+                rules_fired=list(getattr(adj, "rules_fired", []) or []),
+            )
+
         market_prob_b = (1.0 - market_prob_a) if market_prob_a is not None else None
 
         row = {
@@ -148,6 +220,10 @@ def build_watchlist_records(live_records: list[dict[str, Any]] | None = None
             "pre_match_prob_b": round(1 - pre_prob_a, 4),
             "live_prob_a": round(live_prob_a, 4),
             "live_prob_b": round(1 - live_prob_a, 4),
+            "pinnacle_prob_a": (round(pinnacle_prob_a, 4)
+                                 if pinnacle_prob_a is not None else None),
+            "pinnacle_prob_b": (round(pinnacle_prob_b, 4)
+                                 if pinnacle_prob_b is not None else None),
             "market_prob_a": round(market_prob_a, 4) if market_prob_a is not None else None,
             "market_prob_b": round(market_prob_b, 4) if market_prob_b is not None else None,
             "edge_a": round(edge_a, 4) if edge_a is not None else None,
@@ -174,7 +250,34 @@ def build_watchlist_records(live_records: list[dict[str, Any]] | None = None
             # dashboard's Title column matches the click target.
             "event_title": raw.get("event_title"),
         }
-        decision = evaluate_buy(row, cfg.get("trading") or {})
+        # Buy-gate reference cascade — Pinnacle when quoted, else the
+        # Elo model. Same shape as tennis, including the relaxed
+        # model-disagreement veto: the internal model only blocks a
+        # sharp-book signal when it ACTIVELY disagrees by >10pp on the
+        # same side; a silent model is "no vote", not "no".
+        if pinnacle_prob_a is not None:
+            gate_row = dict(row)
+            gate_row["live_prob_a"] = pinnacle_prob_a
+            decision = evaluate_buy(gate_row, cfg.get("trading") or {})
+            _disagree_floor = 0.10
+            if (decision.eligible and decision.side in ("A", "B")
+                    and live_prob_a is not None and not no_model_opinion):
+                _ask_c = row.get("yes_ask_cents_a" if decision.side == "A"
+                                  else "yes_ask_cents_b")
+                _model_side = (float(live_prob_a) if decision.side == "A"
+                                else 1.0 - float(live_prob_a))
+                _model_edge = ((_model_side - float(_ask_c) / 100.0)
+                                if _ask_c is not None else None)
+                if _model_edge is not None and _model_edge < -_disagree_floor:
+                    decision.eligible = False
+                    decision.blockers = list(decision.blockers) + [
+                        f"internal_model_disagrees_{_model_edge*100:+.1f}pp"
+                        f"<-{_disagree_floor*100:.0f}pp"
+                    ]
+                    decision.gates = dict(decision.gates,
+                                           model_confirms=False)
+        else:
+            decision = evaluate_buy(row, cfg.get("trading") or {})
         row["buy_eligible"] = bool(decision.eligible)
         row["buy_score"] = round(float(decision.score), 6)
         row["buy_side"] = decision.side
