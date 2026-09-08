@@ -129,8 +129,13 @@ def build_watchlist_records(live_records: list[dict[str, Any]] | None = None
             # ratings). Surface the row with the market price + no
             # model opinion — edge = 0 by construction, signals emit
             # WATCH only, BUY gate never fires.
-            pre_prob_a = market_prob_a if market_prob_a is not None else 0.5
-            live_prob_a = pre_prob_a
+            # No model probability AT ALL (user 2026-09-08: a market
+            # echo displayed as Model % "is not valid — don't show
+            # it"). Rows with None model prob drop out of
+            # Model-vs-market via the dashboard's no-model-%-no-row
+            # rule; held rows stay visible regardless.
+            pre_prob_a = None
+            live_prob_a = None
             edge_a = 0.0 if market_prob_a is not None else None
             edge_b = 0.0 if market_prob_a is not None else None
             ev_a = 0.0 if market_prob_a is not None else None
@@ -216,10 +221,14 @@ def build_watchlist_records(live_records: list[dict[str, Any]] | None = None
             "current_score": _format_score(rec),
             "round_label": _round_label(raw.get("level", "ST"),
                                           raw.get("round", "")),
-            "pre_match_prob_a": round(pre_prob_a, 4),
-            "pre_match_prob_b": round(1 - pre_prob_a, 4),
-            "live_prob_a": round(live_prob_a, 4),
-            "live_prob_b": round(1 - live_prob_a, 4),
+            "pre_match_prob_a": (round(pre_prob_a, 4)
+                                  if pre_prob_a is not None else None),
+            "pre_match_prob_b": (round(1 - pre_prob_a, 4)
+                                  if pre_prob_a is not None else None),
+            "live_prob_a": (round(live_prob_a, 4)
+                             if live_prob_a is not None else None),
+            "live_prob_b": (round(1 - live_prob_a, 4)
+                             if live_prob_a is not None else None),
             "pinnacle_prob_a": (round(pinnacle_prob_a, 4)
                                  if pinnacle_prob_a is not None else None),
             "pinnacle_prob_b": (round(pinnacle_prob_b, 4)
@@ -255,6 +264,17 @@ def build_watchlist_records(live_records: list[dict[str, Any]] | None = None
         # model-disagreement veto: the internal model only blocks a
         # sharp-book signal when it ACTIVELY disagrees by >10pp on the
         # same side; a silent model is "no vote", not "no".
+        if live_prob_a is None and pinnacle_prob_a is None:
+            # No model, no benchmark — nothing to evaluate.
+            row["buy_eligible"] = False
+            row["buy_score"] = 0.0
+            row["buy_side"] = None
+            row["buy_side_edge"] = 0.0
+            row["buy_side_ev"] = None
+            row["buy_gates"] = {}
+            row["buy_blockers"] = ["no_model_or_benchmark"]
+            out.append(row)
+            continue
         if pinnacle_prob_a is not None:
             gate_row = dict(row)
             gate_row["live_prob_a"] = pinnacle_prob_a
