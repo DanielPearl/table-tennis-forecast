@@ -6,7 +6,7 @@ vector for the matchup, and returns the calibrated win probability for
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -172,7 +172,9 @@ def predict_match(
     assert _BUNDLE is not None and _ELO is not None
     bundle = _BUNDLE
     if match_date is None:
-        match_date = datetime.utcnow()
+        # naive-UTC, same semantics as the deprecated utcnow() —
+        # this file's dates are naive throughout
+        match_date = datetime.now(timezone.utc).replace(tzinfo=None)
     if isinstance(match_date, datetime):
         ref = pd.Timestamp(match_date.date())
     else:
