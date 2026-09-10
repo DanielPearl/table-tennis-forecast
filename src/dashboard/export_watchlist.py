@@ -18,6 +18,8 @@ from typing import Any
 import joblib
 import pandas as pd
 
+from kalshi_sdk.pinnacle import pick_pair_entry
+
 from ..data.fetch_live_scores import load_live_state
 from ..features.build_live_features import standardize
 from ..models.live_adjustment_model import adjust as live_adjust
@@ -42,17 +44,56 @@ def _round_label(level: str, round_: str) -> str:
     return f"{level} / {round_}" if round_ else level
 
 
-def _pinnacle_prob_for(lookup: dict, player_a: str,
-                        player_b: str) -> float | None:
-    """Player-A probability from the Pinnacle pair lookup, or None.
+_MONTHS = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+           "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+
+
+def _ticker_anchor(ticker: str | None) -> tuple[str | None, float]:
+    """(ISO anchor, matching window hours) from a Kalshi TT ticker.
+
+    ``KXTTELITEMATCH-26SEP102130GMIMMA-GMI`` embeds date + HHMM (ET,
+    Kalshi's ticker convention) → tight 6h window, because Liga Pro /
+    TT Elite put the SAME pair on the table twice in one day and a
+    date-level match would share one line across both. Date-only
+    tickers fall back to noon UTC + 24h.
+    """
+    if not ticker:
+        return None, 24.0
+    try:
+        body = ticker.split("-")[1]
+        yy = int(body[:2])
+        mon = _MONTHS.get(body[2:5])
+        dd = int(body[5:7])
+        if mon is None:
+            return None, 24.0
+        hhmm = body[7:11]
+        if len(hhmm) == 4 and hhmm.isdigit():
+            from zoneinfo import ZoneInfo
+            et = datetime(2000 + yy, mon, dd, int(hhmm[:2]), int(hhmm[2:]),
+                          tzinfo=ZoneInfo("America/New_York"))
+            return et.astimezone(timezone.utc).isoformat(), 6.0
+        return f"20{yy:02d}-{mon:02d}-{dd:02d}T12:00:00Z", 24.0
+    except (IndexError, ValueError):
+        return None, 24.0
+
+
+def _pinnacle_prob_for(lookup: dict, player_a: str, player_b: str,
+                        anchor_iso: str | None = None,
+                        max_delta_hours: float = 24.0,
+                        ) -> tuple[float | None, str | None]:
+    """(player-A probability, scheduled start ISO) from the Pinnacle
+    pair lookup, or (None, None).
 
     Same matching as tennis-forecast: exact frozenset first, then a
     loose last-name scan so a diacritic / initial difference between
     Kalshi's and Pinnacle's spellings doesn't drop the line. Keys
     starting with "_" ("_source") are SDK metadata, not names.
+    ``anchor_iso`` (the contract's own day) picks the right entry when
+    the pair has lines on more than one day (Liga Pro rematches are
+    routine); the returned start feeds the prematch-only trade rule.
     """
     if not lookup or not player_a or not player_b:
-        return None
+        return None, None
     pinn_map = lookup.get(frozenset({player_a, player_b}))
     if pinn_map is None:
         la = player_a.split()[-1].lower()
@@ -66,18 +107,24 @@ def _pinnacle_prob_for(lookup: dict, player_a: str,
             if la in lnames and lb in lnames:
                 pinn_map = probs
                 break
+    if pinn_map is not None and anchor_iso is not None:
+        pinn_map = pick_pair_entry(pinn_map, anchor_iso,
+                                   max_delta_hours=max_delta_hours)
     if pinn_map is None:
-        return None
+        return None, None
+    start = pinn_map.get("_start")
     for name, prob in pinn_map.items():
+        if str(name).startswith("_"):
+            continue
         if name == player_a:
-            return float(prob)
+            return float(prob), start
     la = player_a.split()[-1].lower()
     for name, prob in pinn_map.items():
         if str(name).startswith("_"):
             continue
         if la in str(name).lower():
-            return float(prob)
-    return None
+            return float(prob), start
+    return None, start
 
 
 def _load_comeback_rates() -> dict[str, float]:
@@ -188,8 +235,11 @@ def build_watchlist_records(live_records: list[dict[str, Any]] | None = None
         # gate) — the Elo model becomes the fallback reference plus a
         # disagreement veto. This also gives rows the Elo state has
         # no opinion on a real, tradeable benchmark.
-        pinnacle_prob_a = _pinnacle_prob_for(
-            pinnacle_lookup, rec["player_a"], rec["player_b"])
+        _anchor, _win = _ticker_anchor(raw.get("ticker_a")
+                                       or rec.get("match_id"))
+        pinnacle_prob_a, bench_start = _pinnacle_prob_for(
+            pinnacle_lookup, rec["player_a"], rec["player_b"],
+            anchor_iso=_anchor, max_delta_hours=_win)
         pinnacle_prob_b = (1.0 - pinnacle_prob_a
                            if pinnacle_prob_a is not None else None)
         if pinnacle_prob_a is not None:
@@ -219,6 +269,16 @@ def build_watchlist_records(live_records: list[dict[str, Any]] | None = None
             "player_a": rec["player_a"],
             "player_b": rec["player_b"],
             "current_score": _format_score(rec),
+            # Prematch-only rule (2026-09-10): benchmark's scheduled
+            # start (falls back to the ticker's own ET timestamp) plus
+            # a live-score started flag; the shared gate and the live
+            # executor both refuse entries once either marks the match
+            # under way.
+            "kickoff": bench_start or _anchor,
+            "match_started": bool(
+                (rec.get("set_score_a") or 0) > 0
+                or (rec.get("set_score_b") or 0) > 0
+                or rec.get("completed")),
             "round_label": _round_label(raw.get("level", "ST"),
                                           raw.get("round", "")),
             "pre_match_prob_a": (round(pre_prob_a, 4)
