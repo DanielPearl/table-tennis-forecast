@@ -318,6 +318,11 @@ def build_watchlist_records(live_records: list[dict[str, Any]] | None = None
             # Kalshi event-page heading — passed through so the
             # dashboard's Title column matches the click target.
             "event_title": raw.get("event_title"),
+            # Kalshi's rules paragraph — the dashboard's per-row
+            # Rules "i" popover reads it; without this the TT pane's
+            # Model-vs-market rows rendered blank Rules cells (user
+            # 2026-09-11: "include the rules ... in every table").
+            "rules_primary": raw.get("rules_primary"),
         }
         # Buy-gate reference cascade — Pinnacle when quoted, else the
         # Elo model. Same shape as tennis, including the relaxed
