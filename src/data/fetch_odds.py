@@ -37,10 +37,13 @@ def pinnacle_probs_by_pair() -> dict[frozenset, dict[str, float]]:
         out.update(pinnacle_guest_probs_by_pair("table_tennis"))
     except Exception:  # noqa: BLE001 — benchmarks are best-effort
         log.exception("pinnacle guest fetch failed (non-fatal)")
-    try:
-        from .betsapi_odds import betsapi_probs_by_pair
-        for key, probs in betsapi_probs_by_pair().items():
-            out.setdefault(key, probs)
-    except Exception:  # noqa: BLE001
-        log.exception("betsapi fetch failed (non-fatal)")
+    # BetsAPI merge RETIRED here (2026-09-11): the dashboard's
+    # benchmark pass (kalshi_sdk.betsapi via bots/_sport_bot) is the
+    # single BetsAPI consumer now — it rewrites every row's benchmark
+    # anyway, and running this module's own fetch in parallel doubled
+    # the API spend and spammed 502 retries (this path was also built
+    # for the bet365 endpoints, which the actual key's plan 403s;
+    # the SDK module uses the events + odds-summary products the plan
+    # carries, with backoff, an odds-call cap, and an in-play line
+    # filter). src/data/betsapi_odds.py stays for reference only.
     return out
